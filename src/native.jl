@@ -37,6 +37,8 @@ on_native_device(reference::AbstractArray, x::AbstractArray) =
 native_host(x::Array) = x
 native_host(x::AbstractArray) = Array(x)
 native_forward_scope(f, reference) = f()
+native_forward_scope(f, reference, sequence_length) = native_forward_scope(f, reference)
+native_sequence_start(reference, mask, row) = first(axes(mask, 2))
 native_mlp_weights(device, gate, up, down) = (; gate, up, down)
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
@@ -382,9 +384,10 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
         throw(ArgumentError("The final position must be active; use left padding."))
     result = Matrix{Float32}(undef, size(ids, 1), size(backend.readout, 2))
     for row in axes(ids, 1)
-        scores = native_forward_scope(backend.embedding) do
-            hidden = native_gather(backend.embedding, vec(ids[row, :]))
-            row_mask = native_prepare_mask(hidden, vec(mask[row, :]))
+        first_token = native_sequence_start(backend.embedding, mask, row)
+        scores = native_forward_scope(backend.embedding, size(ids, 2) - first_token + 1) do
+            hidden = native_gather(backend.embedding, vec(ids[row, first_token:end]))
+            row_mask = native_prepare_mask(hidden, vec(mask[row, first_token:end]))
             hidden = native_hidden_forward(
                 hidden,
                 backend.layers,

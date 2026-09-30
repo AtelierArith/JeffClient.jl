@@ -80,6 +80,17 @@ function main()
             result["metal_workspace_enabled"] = get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1"
             result["metal_packed_mlp_enabled"] =
                 get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1"
+            result["metal_trim_padding_enabled"] =
+                get(ENV, "JEFF_METAL_TRIM_PADDING", "0") == "1"
+            result["metal_shape_workspaces_enabled"] =
+                get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", "0") == "1"
+            result["metal_computed_sequence_lengths"] = [
+                size(inputs["input_ids"], 2) - JeffClient.native_sequence_start(
+                    backend.embedding,
+                    inputs["attention_mask"],
+                    row,
+                ) + 1 for row in axes(inputs["input_ids"], 1)
+            ]
             extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
             isdefined(extension, :metal_pool_stats) &&
                 (result["metal_pool"] = extension.metal_pool_stats())

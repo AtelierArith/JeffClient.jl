@@ -56,6 +56,22 @@ with torch.inference_mode():
         cases.append({"name": f"length {length}, batch 2", "inputs": {
             "input_ids": ids.tolist(), "attention_mask": mask.tolist()}, "logits": scores.tolist()})
         print(f"Recorded length {length}", flush=True)
+    # Zero prefixes, interior holes, and a single final active token must remain
+    # equivalent when a backend skips only leading padding.
+    for length in (9, 65, 129):
+        ids = torch.randint(0, model.backbone.language_model.config.vocab_size, (3, length))
+        mask = torch.ones_like(ids)
+        prefix = length // 3
+        mask[0, :prefix] = 0
+        mask[0, prefix + 1:-1:3] = 0
+        mask[1, :-1] = 0
+        mask[2, 1:-1:2] = 0
+        hidden = model.backbone.language_model(input_ids=ids, attention_mask=mask,
+            use_cache=False).last_hidden_state[:, -1]
+        scores = model.readout(hidden).float()
+        cases.append({"name": f"interior masks length {length}, batch 3", "inputs": {
+            "input_ids": ids.tolist(), "attention_mask": mask.tolist()}, "logits": scores.tolist()})
+        print(f"Recorded interior masks length {length}", flush=True)
 report = {"format_version": 1, "checkpoint": str(Path(checkpoint).resolve()),
     "torch_version": torch.__version__, "seed": 731, "cases": cases}
 path = Path(destination)

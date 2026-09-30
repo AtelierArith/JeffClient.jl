@@ -25,6 +25,16 @@ function JeffClient.native_array(::Val{:metal}, x)
     return Metal.MtlArray(x)
 end
 
+function JeffClient.native_sequence_start(::Metal.MtlArray, mask, row)
+    start = first(axes(mask, 2))
+    get(ENV, "JEFF_METAL_TRIM_PADDING", "0") == "1" || return start
+    # Remove only the zero prefix; holes inside the sequence retain their positions.
+    while start < last(axes(mask, 2)) && mask[row, start] == 0
+        start += 1
+    end
+    return start
+end
+
 function embedding_gather_kernel!(output, embedding, ids, width, elements)
     index = Int(Metal.thread_position_in_grid_1d())
     if index <= elements

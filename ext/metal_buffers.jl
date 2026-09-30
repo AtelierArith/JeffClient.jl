@@ -105,19 +105,59 @@ mutable struct ForwardWorkspace
     feed_values::Dict{UInt,Vector{MPSGraphTensorData}}
     cursor::Int
     active::Bool
+    bytes::Int
 end
 
 const FORWARD_WORKSPACE_KEY = :JeffClientMetalForwardWorkspace
+const SHAPE_WORKSPACE_KEY = :JeffClientMetalShapeWorkspaces
 
-function clear_forward_workspace!()
-    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
-    workspace isa ForwardWorkspace || return nothing
-    workspace.active && throw(ArgumentError("Cannot clear an active forward workspace."))
-    Metal.synchronize()
+mutable struct ShapeWorkspaces
+    queue::UInt
+    entries::Dict{Int,ForwardWorkspace}
+    order::Vector{Int}
+    byte_limit::Int
+end
+
+new_forward_workspace(queue) = ForwardWorkspace(
+    queue,
+    Any[],
+    Dict{UInt,Int}(),
+    Dict{UInt,Vector{MPSGraphTensorData}}(),
+    Dict{UInt,Vector{MPSGraphTensorData}}(),
+    0,
+    false,
+    0,
+)
+
+function release_workspace!(workspace::ForwardWorkspace)
+    workspace.active && throw(ArgumentError("Cannot release an active forward workspace."))
     empty!(workspace.tensor_data)
     empty!(workspace.feed_values)
     empty!(workspace.slots)
     empty!(workspace.slot_indices)
+    workspace.bytes = 0
+    return nothing
+end
+
+function clear_forward_workspace!()
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    bank = get(task_local_storage(), SHAPE_WORKSPACE_KEY, nothing)
+    workspace isa ForwardWorkspace &&
+        workspace.active &&
+        throw(ArgumentError("Cannot clear an active forward workspace."))
+    if bank isa ShapeWorkspaces
+        any(entry.active for entry in values(bank.entries)) &&
+            throw(ArgumentError("Cannot clear active shape workspaces."))
+    end
+    !(workspace isa ForwardWorkspace) && !(bank isa ShapeWorkspaces) && return nothing
+    Metal.synchronize()
+    workspace isa ForwardWorkspace && release_workspace!(workspace)
+    if bank isa ShapeWorkspaces
+        foreach(release_workspace!, values(bank.entries))
+        empty!(bank.entries)
+        empty!(bank.order)
+        delete!(task_local_storage(), SHAPE_WORKSPACE_KEY)
+    end
     delete!(task_local_storage(), FORWARD_WORKSPACE_KEY)
     return nothing
 end
@@ -135,6 +175,7 @@ function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
         end
         array = fresh_pooled_array(T, dims)
         if slot <= length(workspace.slots)
+            workspace.bytes -= (workspace.slots[slot]::Metal.MtlArray).maxsize
             delete!(workspace.slot_indices, objectid(workspace.slots[slot]))
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
             pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
@@ -143,6 +184,7 @@ function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
             push!(workspace.slots, array)
         end
         workspace.slot_indices[objectid(array)] = slot
+        workspace.bytes += array.maxsize
         return array
     end
     return fresh_pooled_array(T, dims)
@@ -154,15 +196,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
     queue = objectid(Metal.global_queue(Metal.device()))
     workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
     if !(workspace isa ForwardWorkspace) || workspace.queue != queue
-        workspace = ForwardWorkspace(
-            queue,
-            Any[],
-            Dict{UInt,Int}(),
-            Dict{UInt,Vector{MPSGraphTensorData}}(),
-            Dict{UInt,Vector{MPSGraphTensorData}}(),
-            0,
-            false,
-        )
+        workspace = new_forward_workspace(queue)
         task_local_storage(FORWARD_WORKSPACE_KEY, workspace)
     end
     workspace.active && return f() # Nested work must keep advancing the outer slots.
@@ -177,6 +211,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         clear_mps_command_cache!()
         workspace.active = false
         for slot = (workspace.cursor+1):length(workspace.slots)
+            workspace.bytes -= (workspace.slots[slot]::Metal.MtlArray).maxsize
             delete!(workspace.slot_indices, objectid(workspace.slots[slot]))
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
             pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
@@ -190,27 +225,88 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
     end
 end
 
+function evict_shape_workspace!(bank::ShapeWorkspaces)
+    key = popfirst!(bank.order)
+    release_workspace!(pop!(bank.entries, key))
+    return nothing
+end
+
+function JeffClient.native_forward_scope(
+    f::F,
+    reference::Metal.MtlArray,
+    sequence_length::Int,
+) where {F}
+    current = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    current isa ForwardWorkspace &&
+        current.active &&
+        return JeffClient.native_forward_scope(f, reference)
+    enabled =
+        get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1" &&
+        get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", "0") == "1"
+    bank = get(task_local_storage(), SHAPE_WORKSPACE_KEY, nothing)
+    if !enabled
+        bank isa ShapeWorkspaces && clear_forward_workspace!()
+        return JeffClient.native_forward_scope(f, reference)
+    end
+    queue = objectid(Metal.global_queue(Metal.device()))
+    if !(bank isa ShapeWorkspaces) || bank.queue != queue
+        clear_forward_workspace!()
+        bank = ShapeWorkspaces(
+            queue,
+            Dict{Int,ForwardWorkspace}(),
+            Int[],
+            Int(Metal.device().recommendedMaxWorkingSetSize) ÷ 4,
+        )
+        task_local_storage(SHAPE_WORKSPACE_KEY, bank)
+    end
+    index = findfirst(==(sequence_length), bank.order)
+    index !== nothing && deleteat!(bank.order, index)
+    push!(bank.order, sequence_length)
+    workspace = get!(bank.entries, sequence_length) do
+        new_forward_workspace(queue)
+    end
+    while length(bank.order) > 2
+        evict_shape_workspace!(bank)
+    end
+    task_local_storage(FORWARD_WORKSPACE_KEY, workspace)
+    try
+        return JeffClient.native_forward_scope(f, reference)
+    finally
+        # A complete readback or the inner exception handler precedes eviction.
+        while length(bank.order) > 1 &&
+              sum(entry.bytes for entry in values(bank.entries)) > bank.byte_limit
+            evict_shape_workspace!(bank)
+        end
+    end
+end
+
 function metal_pool_stats()
     queue = objectid(Metal.global_queue(Metal.device()))
     workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
-    workspace_arrays = workspace isa ForwardWorkspace ? length(workspace.slots) : 0
-    workspace_bytes =
-        workspace isa ForwardWorkspace ?
-        sum(
-            cld(max(length(array) * sizeof(eltype(array)), 1), BUFFER_PAGE) * BUFFER_PAGE
-            for array in workspace.slots;
-            init = 0,
-        ) : 0
+    bank = get(task_local_storage(), SHAPE_WORKSPACE_KEY, nothing)
+    workspaces =
+        bank isa ShapeWorkspaces ? collect(values(bank.entries)) :
+        workspace isa ForwardWorkspace ? [workspace] : ForwardWorkspace[]
+    workspace_arrays = sum(length(entry.slots) for entry in workspaces; init = 0)
+    workspace_bytes = sum(entry.bytes for entry in workspaces; init = 0)
     @lock BUFFER_POOL_LOCK return (
         misses = BUFFER_MISSES[],
         reuses = BUFFER_REUSES[],
         free_bytes = get(BUFFER_POOL_BYTES, queue, 0),
         workspace_arrays = workspace_arrays,
-        workspace_feed_vectors = workspace isa ForwardWorkspace ?
-                                 length(workspace.feed_values) : 0,
+        workspace_feed_vectors = sum(
+            length(entry.feed_values) for entry in workspaces;
+            init = 0,
+        ),
         workspace_bytes = workspace_bytes,
-        workspace_tensor_data = workspace isa ForwardWorkspace ?
-                                length(workspace.tensor_data) : 0,
+        workspace_tensor_data = sum(
+            length(entry.tensor_data) for entry in workspaces;
+            init = 0,
+        ),
+        workspace_cached_sequence_lengths = bank isa ShapeWorkspaces ?
+                                            sort(collect(keys(bank.entries))) : Int[],
+        workspace_current_arrays = workspace isa ForwardWorkspace ?
+                                   length(workspace.slots) : 0,
         limit_bytes = get(BUFFER_POOL_LIMITS, queue, 0),
         free_buckets = sort(
             [

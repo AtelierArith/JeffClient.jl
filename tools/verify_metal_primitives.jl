@@ -46,6 +46,30 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    previous_trim = get(ENV, "JEFF_METAL_TRIM_PADDING", nothing)
+    try
+        reference = Metal.MtlArray(zeros(Float32, 1, 1))
+        masks = [0 0 1 0 1; 1 0 1 0 1; 0 0 0 0 1; 1 1 1 1 1]
+        ENV["JEFF_METAL_TRIM_PADDING"] = "1"
+        for (row, start) in enumerate((3, 1, 5, 1))
+            JeffClient.native_sequence_start(reference, masks, row) == start ||
+                error("Leading padding start mismatch.")
+            JeffClient.native_sequence_start(zeros(Float32, 1, 1), masks, row) == 1 ||
+                error("CPU unexpectedly trims padding.")
+        end
+        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
+        all(
+            JeffClient.native_sequence_start(reference, masks, row) == 1 for
+            row in axes(masks, 1)
+        ) || error("Disabled trimming changed sequence start.")
+    finally
+        if previous_trim === nothing
+            delete!(ENV, "JEFF_METAL_TRIM_PADDING")
+        else
+            ENV["JEFF_METAL_TRIM_PADDING"] = previous_trim
+        end
+    end
+    println("Validated leading padding selection, interior masks, and disabled trimming.")
     probe = Metal.MtlArray(zeros(Float32, 7))
     extension.launch_cached_kernel!(kernel_handle_probe!, probe; threads = 32, groups = 1)
     all(==(1.0f0), Array(probe)) || error("Cached kernel probe mismatch.")
@@ -230,6 +254,7 @@ function main()
         "Validated fused delta beta/decay for head counts, lengths, and extreme inputs.",
     )
     previous_workspace_setting = get(ENV, "JEFF_METAL_WORKSPACE", nothing)
+    previous_shape_setting = get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", nothing)
     ENV["JEFF_METAL_WORKSPACE"] = "1"
     try
         host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
@@ -390,11 +415,94 @@ function main()
         isempty(workspace.slot_indices) &&
         isempty(workspace.feed_values) ||
             error("Packed workspace retains objects after clear.")
+        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
+        previous_shape_arrays = Dict{Int,Any}()
+        previous_shape_data = Dict{Int,Any}()
+        for sequence_length in (9, 1, 9, 1, 65)
+            input = Metal.MtlArray(ones(Float32, 7, sequence_length))
+            actual = JeffClient.native_forward_scope(weight, sequence_length) do
+                JeffClient.native_host(JeffClient.native_linear(weight, input))
+            end
+            isapprox(
+                actual,
+                transpose(host_weight) * ones(Float32, 7, sequence_length);
+                atol = 2.0f-5,
+                rtol = 2.0f-5,
+            ) || error("Shape workspace product mismatch.")
+            bank = task_local_storage(extension.SHAPE_WORKSPACE_KEY)
+            current = bank.entries[sequence_length]
+            array = only(current.slots)
+            data = current.tensor_data[objectid(array)][1]
+            if haskey(previous_shape_arrays, sequence_length)
+                array === previous_shape_arrays[sequence_length] ||
+                    error("Shape workspace array not reused.")
+                data === previous_shape_data[sequence_length] ||
+                    error("Shape workspace tensor-data not reused.")
+            end
+            previous_shape_arrays[sequence_length], previous_shape_data[sequence_length] =
+                array, data
+            length(bank.entries) <= 2 || error("Shape workspace count limit exceeded.")
+            current.bytes == array.maxsize || error("Workspace buffer accounting mismatch.")
+            GC.gc(true)
+        end
+        bank = task_local_storage(extension.SHAPE_WORKSPACE_KEY)
+        bank.order == [1, 65] || error("Shape workspace LRU mismatch.")
+        bank.byte_limit = extension.BUFFER_PAGE
+        JeffClient.native_forward_scope(weight, 9) do
+            JeffClient.native_host(
+                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9))),
+            )
+        end
+        collect(keys(bank.entries)) == [9] ||
+            error("Shape workspace byte limit not enforced.")
+        bank.byte_limit = typemax(Int)
+        JeffClient.native_forward_scope(weight, 9) do
+            current = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            JeffClient.native_forward_scope(weight, 99) do
+                task_local_storage(extension.FORWARD_WORKSPACE_KEY) === current ||
+                    error("Nested scope changed workspace.")
+                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9)))
+            end
+            Metal.synchronize()
+        end
+        !haskey(bank.entries, 99) || error("Nested scope added shape workspace.")
+        try
+            JeffClient.native_forward_scope(weight, 1) do
+                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 1)))
+                error("shape workspace failure probe")
+            end
+        catch exception
+            exception isa ErrorException &&
+            exception.msg == "shape workspace failure probe" || rethrow()
+        end
+        for entry in values(bank.entries)
+            !entry.active || error("Shape workspace active after failure.")
+            for (key, values) in entry.feed_values
+                all(value === entry.tensor_data[key][1] for value in values) ||
+                    error("Shape workspace retains input bindings.")
+            end
+        end
+        entries = collect(values(bank.entries))
+        extension.clear_forward_workspace!()
+        isempty(bank.entries) && isempty(bank.order) ||
+            error("Shape workspace bank not cleared.")
+        all(
+            isempty(entry.slots) &&
+                isempty(entry.tensor_data) &&
+                isempty(entry.feed_values) &&
+                isempty(entry.slot_indices) &&
+                entry.bytes == 0 for entry in entries
+        ) || error("Shape workspace retains objects after clear.")
     finally
         if previous_workspace_setting === nothing
             delete!(ENV, "JEFF_METAL_WORKSPACE")
         else
             ENV["JEFF_METAL_WORKSPACE"] = previous_workspace_setting
+        end
+        if previous_shape_setting === nothing
+            delete!(ENV, "JEFF_METAL_SHAPE_WORKSPACES")
+        else
+            ENV["JEFF_METAL_SHAPE_WORKSPACES"] = previous_shape_setting
         end
     end
     println("Validated workspace arrays/result Vectors across length changes and GC.")
