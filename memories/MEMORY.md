@@ -55,3 +55,36 @@
 - Laya は中間配列を演算の後で明示的に release し、同じ queue の後続 GPU 演算で private バッファを再利用する。JeffClient の従来のプールは最終 owner の GC/完了待ちに依存するため、1 推論内の再利用が不足していた。明示的 release は GPU の順序と物理バッファの寿命を守って実装する必要がある。shared バッファの CPU 書き換えには、依然として GPU 完了が必要。
 - Laya は RoPE の cos/sin テーブルをキャッシュし、head の分割・RoPE・レイアウト変換を一つのカーネルにまとめている。JeffClient は各 full attention 層でテーブルの生成・アップロード、slice、cat、permutedims を繰り返している。
 - Laya は residual と normalization、MLP の gate をそれぞれ融合している。JeffClient の RMS と SiLU でも同様の融合を検討できる。Laya の Flash Attention は head dim 64 専用で、Jeff 0.8B の head dim 256 へそのまま適用できない。タイル幅・register 数・threadgroup memory・occupancy を再設計して測る必要がある。
+
+## Cthulhu / TypedSyntax で MPS の割当元を追った結果
+
+2026-10-01、Julia 1.13.1、Cthulhu 3.0.2、TypedSyntax 1.5.4、Metal 1.11.1。
+診断用の `tools` 環境へ追加し、`tools/inspect_typed_source.jl` を作った。
+
+- Cthulhu は型推論結果を見ながら呼び出し先へ降りるために使った。TypedSyntax は結果を元のソースに対応づける表示に使った。これらがコードを自動修正したわけではなく、見つけた割当元をもとに実装を変更した。
+- RoPE 融合後の JET 6 対象は既に報告なしで、Profile.Allocs の MPS feed/result・tensor-data 関連 3 箇所は約 34% を占めていた。この実測を出発点に、Cthulhu の対話的 descent で `MPSGraphTensorData(::MtlArray)` → `convert(MPSShape, reverse(size(matrix)))` へ降りた。
+- Metal の shape 変換は `NSArray(NSNumber.(collect(tuple)))`。戻り値は具体的な `NSArray` に推論されていたが、呼び出しごとに `Vector{Int}`、`Vector{NSNumber}`、Objective-C の array を作っていた。型が確定していても、こうした明示的なオブジェクト生成の割当は残る。
+- 修正では `ProductGraph` に A/B/C の immutable な shape を保持し、`graph_tensor_data(matrix, cached_shape)` から buffer・既存 shape・dtype を受け取る MPS コンストラクタを呼ぶようにした。shape は graph key のサイズと一致するので、通常・転置・バッチ行列積で共有できる。tensor-data と feed/result 辞書の生成そのものは残っている。
+- 最初の shape キャッシュでは実モデル検証が `NSInvalidArgumentException`（解放済みの array に `count` を送信）で落ちた。ObjectiveC.jl の `NSArray` は `managed=false` の autoreleased wrapper であり、Julia のフィールド参照だけでは pool 終了後の Objective-C オブジェクトの生存を保証しなかった。
+- shape ごとに明示的な `retain` を行い、mutable な `ProductGraph` の finalizer で対応する `release` を行う形に修正した。修正後の実モデル **12 ケース × 3 回**は GC を挟んで通り、最大 logit 誤差は **`3.361702e-5`**。単体 verifier も同じ graph を GC/pool 終了後に再利用する検証へ拡張した。
+- 同じ Float32・batch 1・長さ 256・101 active tokens、20 回のウォーム計測で、shape 再利用前後の割当は **33,202 回 → 28,426 回（約 14.4% 減）**、heap bytes は **1,640,432 → 1,449,392（約 11.6% 減）**。中央値は **234.060896 → 218.520229 ms** だった。最新の min/p95/max は 216.2/291.5/365.0 ms で、前後の時間の分布は重なる。速度の差を確定的なものとは扱わず、割当削減を確認できた改善として記録する。Cthulhu の導入だけで速度が上がったとは扱わない。
+- 修正後も JET の 6 対象はすべて報告なし。10% の割当プロファイルは 3,099 サンプルで、MPS feed/result・encode の 3 箇所は 687 サンプル（約 22%）だった。TypedSyntax の全 7 対象も表示でき、修正後の `graph_tensor_data` は既存 `NSArray` を受け取って具体的な `MPSGraphTensorData` を返すことを確認した。
+- TypedSyntax のソース対応づけは macro・closure で不完全になり得る。実際、`@autoreleasepool` のある `batched_matmul!` では、`key = MatmulGraphKey(...)` に生成された closure の型が対応づけられた。表示だけを根拠に型の問題と判断せず、Cthulhu の `[T]yped` 表示や `code_warntype` の IR と照合する。
+
+再利用するコマンド（REFERENCE は従来の JSON 配列・拡張 document の両方に対応）:
+
+```sh
+# 非対話: TypedSyntax のソース表示
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE all source
+# 非対話: macro 展開後の型付き IR
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE submit typed
+# 対話: 元の MPS コンストラクタから shape 変換へ降りる
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE tensor descend
+# キャッシュした shape を使う修正後のコンストラクタ
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-tensor source
+```
+
+`descend` は terminal と明示的な指定がある場合だけ起動する。
+バッチ診断では `source` / `typed` を使い、メニュー入力待ちで停止させない。
+参照: [Cthulhu README](https://github.com/JuliaDebug/Cthulhu.jl)、
+[TypedSyntax README](https://github.com/JuliaDebug/Cthulhu.jl/blob/master/TypedSyntax/README.md)。

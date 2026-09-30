@@ -142,18 +142,20 @@ extension methods at that stage.
 - Fuse Q/K RMS, partial RoPE, grouped head expansion, and the MPS head layout;
   merge output layout and sigmoid gating in one kernel. Cache the current RoPE
   table pair per queue with width/length/base in its key.
+- Use Cthulhu/TypedSyntax to inspect profiled allocation sites, and reuse MPS
+  shape metadata in cached graphs with explicit Objective-C retain/release.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.234 s**, original Python MPS
-**0.350 s**. Julia heap: **33,202 allocations / 1,640,432 bytes**. This is ~10.6×
-faster than the 2.492 s implementation, with ~98.8% fewer allocations. Loading
+20 warmed synchronized calls: Julia Metal **0.219 s**, original Python MPS
+**0.350 s**. Julia heap: **28,426 allocations / 1,449,392 bytes**. This is ~11.4×
+faster than the 2.492 s implementation, with ~99.0% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
 GC between cases and disabled scalar indexing. The tiny fixture and primitive
 checks cover independent scores, real RMS widths, grouped head layouts,
 partial/full/no RoPE, gates, and cache keys. All six inspected JET targets are
-clean. MPS feed/result and tensor-data sites account for about one third of the
-latest 10% allocation sample; residual/MLP operations and kernel launches remain.
+clean. MPS feed/result/encode sites account for about 22% of the latest 10%
+allocation sample after shape reuse; residual/MLP operations and kernel launches remain.
 
 The benchmark retained ~1.57 GB of private pooled buffers; this is not peak GPU
 memory. The timing range is broad, so tail-latency improvement is not established.

@@ -134,7 +134,8 @@ products encoded into the current command batch, pooled output buffers, shared
 uploads, and Julia Metal kernels for recurrent DeltaNet, depthwise convolution,
 RMS/L2 normalization, causal masked softmax, and fused partial RoPE/head layouts
 with queue-local trigonometric tables. Full-attention heads use batched matrix
-products. Product-only graphs omit `beta*C`, so recycled destination
+products. Graphs also retain immutable Objective-C shape metadata for repeated
+tensor-data construction. Product-only graphs omit `beta*C`, so recycled destination
 contents are never read; NaN-poisoned destinations are checked by a verifier.
 For DeltaNet key widths above 256, the stable chunked triangular solve remains
 available. Forming its inverse with repeated products was numerically unstable.
@@ -180,27 +181,27 @@ scores to CPU are included. GPU measurements wait for completion.
 | Backend | Weight precision | Samples | Median per forward |
 | --- | --- | ---: | ---: |
 | Native Julia CPU (8 BLAS threads) | Float32 | 10 | 1.834 s |
-| Native Julia Metal (fused kernels) | Float32 | 20 | 0.234 s |
+| Native Julia Metal (fused kernels) | Float32 | 20 | 0.219 s |
 | Original Jeff / PyTorch CPU (8 threads) | Float32 | 10 | 2.988 s |
 | Original Jeff / PyTorch MPS | BF16 (original default) | 10 | 0.333 s |
 | Original Jeff / PyTorch MPS | Float32 | 20 | 0.350 s |
 
-For this prepared batch-1 case, Julia Metal takes about **33% less time than
-PyTorch MPS at the same Float32 precision** (~1.49× throughput). This comparison
+For this prepared batch-1 case, Julia Metal takes about **38% less time than
+PyTorch MPS at the same Float32 precision** (~1.60× throughput). This comparison
 does not establish performance for other lengths or batch sizes.
 The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 1.87 s and its first forward took 13.36 s
+Julia Metal's model loading took 1.90 s and its first forward took 12.82 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 33,202 Julia heap allocations / 1.64 MB per
+BenchmarkTools measured 28,426 Julia heap allocations / 1.45 MB per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
-fell from 2.492 s to 0.234 s (~10.6× faster). Allocation counts fell from 2,845,912
-to 33,202 (~98.8%), and Julia heap bytes from 145,768,352 to 1,640,432 (~98.9%). Device-only buffers
+fell from 2.492 s to 0.219 s (~11.4× faster). Allocation counts fell from 2,845,912
+to 28,426 (~99.0%), and Julia heap bytes from 145,768,352 to 1,449,392 (~99.0%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -208,7 +209,10 @@ overwrites destinations without reading their previous contents.
 
 RoPE/head fusion reduced allocations from 44,097 to 33,202 and heap bytes from
 3.46 MB to 1.64 MB. Median latency fell from 253 to 234 ms; the latest trial's
-minimum/p95/maximum were 218/312/382 ms, so a tail-latency improvement is not established.
+minimum/p95/maximum were 218/312/382 ms. Reusing MPS shapes then reduced
+allocations to 28,426 and heap bytes to 1.45 MB; its median/minimum/p95/maximum
+were 219/216/291/365 ms. The timing distributions overlap, so the incremental
+latency improvement is less certain than the allocation reduction.
 
 The trial recorded 6,256 private-buffer reuses and 425 shared-upload reuses.
 It retained about 1.57 GB of free device buffers afterward: reducing allocation
@@ -259,7 +263,8 @@ kernel timings. Mask sharing, buffer reuse, batched command submission, and
 shared uploads were then implemented. Recurrent DeltaNet, batched head products,
 and fused convolution/normalization/softmax subsequently removed most of these
 allocations. A later 10% sample found RMS normalization accounted for about 24%
-of allocations before its fusion. Remaining work includes RoPE/layout fusion,
+of allocations before its fusion. RoPE/head fusion removed its slices and
+layout copies. Remaining work includes fused residual/MLP operations,
 explicit intermediate release, and reuse of workspace and MPS feed objects.
 Detailed observations and intermediate measurements are in
 [memories/MEMORY.md](memories/MEMORY.md).
@@ -277,6 +282,36 @@ JEFF_ALLOC_SAMPLE_RATE=0.1 julia --project=tools tools/inspect_native.jl CHECKPO
 AllocCheck could not be combined with this Metal environment: its registered
 versions require GPUCompiler ≤1.23, while Metal 1.11 requires GPUCompiler ≥2.7.
 The runtime allocation measurements above use Julia's built-in allocation profiler.
+
+### Cthulhu and TypedSyntax
+
+`tools/inspect_typed_source.jl` displays inferred types on source with TypedSyntax,
+prints raw inferred IR, or starts Cthulhu's interactive descent. Cthulhu 3.0.2 and
+TypedSyntax 1.5.4 were used on Julia 1.13.1. They are tools dependencies.
+
+Following the allocation profile into `MPSGraphTensorData`, Cthulhu exposed the
+shape conversion `NSArray(NSNumber.(collect(tuple)))`. This concrete-typed path
+still built containers per call. Keeping the immutable shapes in the cached graph
+reduced forward allocations by 14.4%. The unmanaged `NSArray` objects need explicit
+retain/release to survive autorelease-pool drainage; GC/repeated-forward validation
+checks that lifetime. Tensor-data wrappers and feed dictionaries still allocate.
+
+```bash
+# Batch source report; accepts old and expanded reference JSON:
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT_DIRECTORY REFERENCE_JSON all source
+# Raw inferred IR:
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT_DIRECTORY REFERENCE_JSON submit typed
+# Explicit interactive mode, in a terminal:
+julia --project=tools tools/inspect_typed_source.jl CHECKPOINT_DIRECTORY REFERENCE_JSON tensor descend
+```
+
+Targets include `logits`, `full`, `delta`, `rope`, `submit`, `tensor`, and
+`cached-tensor`. Macro/closure source mapping can omit or misplace annotations;
+check surprising results against raw IR or Cthulhu's typed view. Allocation and
+GPU timing still require runtime measurements. See the
+[Cthulhu](https://github.com/JuliaDebug/Cthulhu.jl) and
+[TypedSyntax](https://github.com/JuliaDebug/Cthulhu.jl/blob/master/TypedSyntax/README.md)
+documentation for their roles and mapping limitations.
 
 ## Development
 

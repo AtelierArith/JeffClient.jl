@@ -13,7 +13,7 @@ using Metal.MPSGraphs:
     transposeTensor,
     matrixMultiplicationWithPrimaryTensor,
     default_exec_desc
-using Metal.ObjectiveC.Foundation: @autoreleasepool, NSDictionary, nil
+using Metal.ObjectiveC.Foundation: @autoreleasepool, NSDictionary, nil, retain, release
 
 include("metal_buffers.jl")
 
@@ -43,17 +43,23 @@ function JeffClient.native_matmul(
     return result
 end
 
-struct ProductGraph
+mutable struct ProductGraph
     graph::MPSGraph
     place_a::MPSGraphTensor
     place_b::MPSGraphTensor
     result::MPSGraphTensor
+    shape_a::MPS.MPSShape
+    shape_b::MPS.MPSShape
+    shape_c::MPS.MPSShape
 end
 
 function ProductGraph(key::MatmulGraphKey{T,T}) where {T}
     graph = MPSGraph()
-    place_a = placeholderTensor(graph, key.size_a, T)
-    place_b = placeholderTensor(graph, key.size_b, T)
+    shape_a = convert(MPS.MPSShape, reverse(key.size_a))
+    shape_b = convert(MPS.MPSShape, reverse(key.size_b))
+    shape_c = convert(MPS.MPSShape, reverse(key.size_c))
+    place_a = placeholderTensor(graph, shape_a, T)
+    place_b = placeholderTensor(graph, shape_b, T)
     a =
         key.transpose_a == 'T' ?
         transposeTensor(graph, place_a, key.ndims_a - 2, key.ndims_a - 1) : place_a
@@ -62,11 +68,25 @@ function ProductGraph(key::MatmulGraphKey{T,T}) where {T}
         transposeTensor(graph, place_b, key.ndims_b - 2, key.ndims_b - 1) : place_b
     # MPSGraph tensor shapes reverse Julia's column-major dimensions.
     result = matrixMultiplicationWithPrimaryTensor(graph, b, a)
-    return ProductGraph(graph, place_a, place_b, result)
+    cached = ProductGraph(graph, place_a, place_b, result, shape_a, shape_b, shape_c)
+    # NSArray is an unmanaged autoreleased wrapper in ObjectiveC.jl. Julia's
+    # cache alone cannot keep its underlying object alive beyond this pool.
+    retain(shape_a)
+    retain(shape_b)
+    retain(shape_c)
+    finalizer(cached) do owner
+        release(owner.shape_a)
+        release(owner.shape_b)
+        release(owner.shape_c)
+    end
+    return cached
 end
 
 const PRODUCT_GRAPH_CACHE = Dict{MatmulGraphKey,ProductGraph}()
 const PRODUCT_GRAPH_LOCK = ReentrantLock()
+
+graph_tensor_data(matrix::Metal.MtlArray{T}, shape::MPS.MPSShape) where {T} =
+    MPSGraphTensorData(matrix.data[], shape, T)
 
 # Following Laya, encode the cached MPSGraph into Metal's current batch instead
 # of committing a separate command buffer (and flushing kernels) per product.
@@ -77,11 +97,14 @@ const PRODUCT_GRAPH_LOCK = ReentrantLock()
         ProductGraph(key)
     end
     feeds = Dict{MPSGraphTensor,MPSGraphTensorData}(
-        cached.place_a => MPSGraphTensorData(a),
-        cached.place_b => MPSGraphTensorData(b),
+        # The MtlArray constructor rebuilds collect/NSNumber/NSArray shape
+        # metadata on every call. Shapes are immutable and already graph-keyed.
+        cached.place_a => graph_tensor_data(a, cached.shape_a),
+        cached.place_b => graph_tensor_data(b, cached.shape_b),
     )
-    results =
-        Dict{MPSGraphTensor,MPSGraphTensorData}(cached.result => MPSGraphTensorData(c))
+    results = Dict{MPSGraphTensor,MPSGraphTensorData}(
+        cached.result => graph_tensor_data(c, cached.shape_c),
+    )
     queue = Metal.global_queue(Metal.device())
     Metal.end_encoder!(queue)
     command = MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))

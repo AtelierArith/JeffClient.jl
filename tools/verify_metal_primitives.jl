@@ -17,11 +17,6 @@ function main()
         right = reshape(cos.(Float32.(1:prod(dims_b))), dims_b)
         a, b = Metal.MtlArray(left), Metal.MtlArray(right)
         output = extension.pooled_array(Float32, dims_c)
-        # A product-only graph must overwrite every destination element even
-        # when recycled storage is poisoned; zero*NaN would still be NaN.
-        fill!(output, NaN32)
-        extension.batched_matmul!(output, a, b, transpose_a, transpose_b)
-        actual = Array(output)
         expected = similar(left, dims_c)
         for head = 1:heads
             l, r = heads == 1 ? (left, right) : (left[:, :, head], right[:, :, head])
@@ -33,14 +28,21 @@ function main()
                 expected[:, :, head] .= l * r
             end
         end
-        all(isfinite, actual) || error("Poisoned destination affected the product.")
-        isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) ||
-            error("Product mismatch.")
-        maximum_error = max(maximum_error, maximum(abs.(actual .- expected)))
-        GC.gc(true)
+        for pass = 1:2
+            # A product-only graph must overwrite poisoned destinations. Repeat
+            # after GC/pool drainage to exercise cached Objective-C shape lifetimes.
+            fill!(output, NaN32)
+            extension.batched_matmul!(output, a, b, transpose_a, transpose_b)
+            actual = Array(output)
+            all(isfinite, actual) || error("Poisoned destination affected the product.")
+            isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+                error("Product mismatch.")
+            maximum_error = max(maximum_error, maximum(abs.(actual .- expected)))
+            GC.gc(true)
+        end
     end
     println(
-        "Validated 8 matrix/batched products with NaN destinations; max error ",
+        "Validated 8 matrix/batched product combinations × 2 passes with NaN destinations; max error ",
         maximum_error,
     )
     for width in (8, 128, 256, 1024), centered in (true, false)
