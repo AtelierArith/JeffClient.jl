@@ -1,5 +1,9 @@
 # ONNX fixture
 
+`logits.onnx` is committed in this repository. A normal Git clone includes it;
+running the demo or `Pkg.instantiate()` does not generate it. Regeneration is
+optional and is not part of the initial setup.
+
 `logits.onnx` is a tiny Identity graph: float tensors named `scores` and
 `logits`, with dynamic `(batch, options)` dimensions. It contains no weights.
 It uses ONNX IR version 8 and opset 13. The test suite executes this graph with

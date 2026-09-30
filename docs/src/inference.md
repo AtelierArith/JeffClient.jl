@@ -1,5 +1,29 @@
 # Inference and accelerators
 
+## Setup and tiny ONNX demo
+
+Install Julia 1.13 and Git, then run:
+
+```bash
+git clone https://github.com/AtelierArith/JeffClient.jl.git
+cd JeffClient.jl
+julia --project -e 'using Pkg; Pkg.instantiate()'
+julia --project examples/prepared_inference.jl
+```
+
+The `test/fixtures/logits.onnx` file is tracked by Git and included in the
+clone. The example does not generate it. This tiny Identity graph processes
+supplied scores; it contains no Jeff weights and prints `Choice: yes` with
+probability `0.75`. No Python or checkpoint download is required. Internet
+access is needed for the initial Julia dependency installation.
+
+For Metal examples, on a Mac with an Apple GPU, first install the tools
+environment from the repository root:
+
+```bash
+julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+```
+
 ## Real-checkpoint demo
 
 Run the bundled parcel-classification example from the repository root:
@@ -9,7 +33,9 @@ julia --project examples/native_inference.jl
 # Or reuse a local checkpoint:
 julia --project examples/native_inference.jl CHECKPOINT_DIRECTORY cpu
 # Apple GPU, using the tools environment that includes Metal:
-julia --project=tools examples/native_inference.jl CHECKPOINT_DIRECTORY metal
+julia --project=tools examples/metal_inference.jl
+# Or reuse local weights on Metal:
+julia --project=tools examples/metal_inference.jl CHECKPOINT_DIRECTORY
 ```
 
 The default command resolves the pinned Jeff-Qwen3.5-0.8B checkpoint, downloading
@@ -33,6 +59,11 @@ The fixture's tokens were prepared using the original Jeff tokenizer for revisio
 `0f212b3e72acb4dde3f7da61e925d6ab7f819990`. Its option order is refund, then delivery.
 The displayed state is informational: changing it or the question does not
 regenerate tokens. General text tokenization remains outside this API.
+
+The standalone Metal example imports Metal, checks `Metal.functional()`, disables
+scalar GPU indexing, constructs `NativeBackend(checkpoint; device=:metal)`, and
+returns the decision to CPU. It uses the same real weights and prepared prompt
+as the CPU example. It requires an Apple GPU; no Python or ONNX export is used.
 
 ## Prepared-tensor inference
 
