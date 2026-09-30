@@ -8,8 +8,23 @@ Python is needed only for export and reference tools, through PythonCall.jl.
 ## Quick start: native Julia on CPU
 
 Run [examples/native_inference.jl](examples/native_inference.jl) with Jeff's
-actual 0.8B weights. Install Julia 1.13 and Git, then run these commands in a
-terminal (internet access is needed for dependencies and the first model download):
+actual 0.8B weights. First install Julia through
+[juliaup](https://github.com/JuliaLang/juliaup). On macOS or Linux:
+
+```bash
+curl -fsSL https://install.julialang.org | sh
+```
+
+Reopen your terminal after installation, then install and select Julia 1.13:
+
+```bash
+juliaup add 1.13
+juliaup default 1.13
+julia --version
+```
+
+With Git installed, run the following commands (internet access is needed for
+dependencies and the first model download):
 
 ```bash
 git clone https://github.com/AtelierArith/JeffClient.jl.git
