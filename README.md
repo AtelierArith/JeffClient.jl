@@ -136,7 +136,10 @@ RMS/L2 normalization, causal masked softmax, and fused partial RoPE/head layouts
 with queue-local trigonometric tables. Full-attention heads use batched matrix
 products. Graphs also retain immutable Objective-C shape metadata for repeated
 tensor-data construction. Product-only graphs omit `beta*C`, so recycled destination
-contents are never read; NaN-poisoned destinations are checked by a verifier.
+contents are never read. Fixed feed/result keys are also retained with the graph;
+tensor dictionaries are built from their changing values without Julia Dict
+storage or keys/values conversion copies. NaN-poisoned destinations are checked
+by a verifier.
 For DeltaNet key widths above 256, the stable chunked triangular solve remains
 available. Forming its inverse with repeated products was numerically unstable.
 This backend uses Metal.jl directly and does not depend on MLX.
@@ -193,15 +196,15 @@ The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 1.90 s and its first forward took 12.82 s
+Julia Metal's model loading took 1.86 s and its first forward took 12.94 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 28,426 Julia heap allocations / 1.45 MB per
+BenchmarkTools measured 24,048 Julia heap allocations / 1.17 MB per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
 fell from 2.492 s to 0.219 s (~11.4× faster). Allocation counts fell from 2,845,912
-to 28,426 (~99.0%), and Julia heap bytes from 145,768,352 to 1,449,392 (~99.0%). Device-only buffers
+to 24,048 (~99.2%), and Julia heap bytes from 145,768,352 to 1,172,384 (~99.2%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -213,6 +216,9 @@ minimum/p95/maximum were 218/312/382 ms. Reusing MPS shapes then reduced
 allocations to 28,426 and heap bytes to 1.45 MB; its median/minimum/p95/maximum
 were 219/216/291/365 ms. The timing distributions overlap, so the incremental
 latency improvement is less certain than the allocation reduction.
+Fixed feed/result keys and direct dictionary construction subsequently reduced
+allocations to 24,048 and heap bytes to 1.17 MB. The 219 ms median was unchanged;
+this step improved host allocation without an observed speed gain.
 
 The trial recorded 6,256 private-buffer reuses and 425 shared-upload reuses.
 It retained about 1.57 GB of free device buffers afterward: reducing allocation

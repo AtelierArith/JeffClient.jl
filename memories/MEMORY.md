@@ -88,3 +88,12 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 バッチ診断では `source` / `typed` を使い、メニュー入力待ちで停止させない。
 参照: [Cthulhu README](https://github.com/JuliaDebug/Cthulhu.jl)、
 [TypedSyntax README](https://github.com/JuliaDebug/Cthulhu.jl/blob/master/TypedSyntax/README.md)。
+
+## MPS feed/result の Julia Dict と変換コピーを除いた結果
+
+- shape 再利用後も、`NSDictionary(::Dict)` は `collect(keys)` / `collect(values)` とそれぞれの `NSArray` を作る。feed/result のキーは graph ごとに固定なので、`ProductGraph` に key array を保持し、値の `Vector{MPSGraphTensorData}` だけを作って Objective-C の dictionary factory へ渡す形にした。Julia Dict の backing storage と key/value のコピーが不要になった。
+- キャッシュした key array は shape と同じ unmanaged な `NSArray` なので、明示的な retain/release を行う。変更ごとに作る値の vector は queue roots に残し、managed な tensor-data と GPU バッファの寿命を保つ。autoreleased な NSDictionary は、従来同様、pool 内で `encode!` に渡す。
+- 通常・転置・バッチの 8 組合せ × 2 回（NaN 出力・GC 後の再利用）、RMS/RoPE の単体検証、実モデル **12 ケース × 3 回**が通った。実モデルの最大 logit 誤差は引き続き **`3.361702e-5`**。
+- 同じ M4・Float32・batch 1・長さ 256・101 active tokens、20 回の計測で **24,048 回 / 1,172,384 bytes**。直前の 28,426 回 / 1,449,392 bytes に対して、割当数は約 **15.4%**、heap bytes は約 **19.1%** 減った。中央値は **218.8108335 ms**（直前 218.520229 ms）で、速度改善は確認できなかった。
+- private free pool は同じ約 1.57 GB。今回の変更はホスト管理オブジェクトの削減であり、GPU の保持量は減っていない。tensor-data、値の vector、Objective-C 辞書・カーネル起動の管理オブジェクトは依然として生成する。
+- 修正後の JET 6 対象はすべて報告なし。10% の割当プロファイルは 2,653 サンプルで、RMS launch は 338、residual/MLP の 4 箇所は計 400 サンプルだった（合わせて約 28%）。`tensor_dictionary` は 164 サンプル。これは割当の構成比であり、GPU 実行時間の構成比ではない。次の候補は residual + RMS と MLP gate の融合、および中間バッファの明示的な再利用。

@@ -4,6 +4,7 @@ import JeffClient
 import Metal
 using LinearAlgebra
 using Metal: MPS
+using Metal.ObjectiveC: @objc, id
 using Metal.MPSGraphs:
     MatmulGraphKey,
     MPSGraph,
@@ -13,7 +14,8 @@ using Metal.MPSGraphs:
     transposeTensor,
     matrixMultiplicationWithPrimaryTensor,
     default_exec_desc
-using Metal.ObjectiveC.Foundation: @autoreleasepool, NSDictionary, nil, retain, release
+using Metal.ObjectiveC.Foundation:
+    @autoreleasepool, NSArray, NSDictionary, nil, retain, release
 
 include("metal_buffers.jl")
 
@@ -51,6 +53,8 @@ mutable struct ProductGraph
     shape_a::MPS.MPSShape
     shape_b::MPS.MPSShape
     shape_c::MPS.MPSShape
+    feed_keys::NSArray
+    result_keys::NSArray
 end
 
 function ProductGraph(key::MatmulGraphKey{T,T}) where {T}
@@ -68,16 +72,32 @@ function ProductGraph(key::MatmulGraphKey{T,T}) where {T}
         transposeTensor(graph, place_b, key.ndims_b - 2, key.ndims_b - 1) : place_b
     # MPSGraph tensor shapes reverse Julia's column-major dimensions.
     result = matrixMultiplicationWithPrimaryTensor(graph, b, a)
-    cached = ProductGraph(graph, place_a, place_b, result, shape_a, shape_b, shape_c)
+    feed_keys = NSArray([place_a, place_b])
+    result_keys = NSArray([result])
+    cached = ProductGraph(
+        graph,
+        place_a,
+        place_b,
+        result,
+        shape_a,
+        shape_b,
+        shape_c,
+        feed_keys,
+        result_keys,
+    )
     # NSArray is an unmanaged autoreleased wrapper in ObjectiveC.jl. Julia's
     # cache alone cannot keep its underlying object alive beyond this pool.
     retain(shape_a)
     retain(shape_b)
     retain(shape_c)
+    retain(feed_keys)
+    retain(result_keys)
     finalizer(cached) do owner
         release(owner.shape_a)
         release(owner.shape_b)
         release(owner.shape_c)
+        release(owner.feed_keys)
+        release(owner.result_keys)
     end
     return cached
 end
@@ -88,6 +108,15 @@ const PRODUCT_GRAPH_LOCK = ReentrantLock()
 graph_tensor_data(matrix::Metal.MtlArray{T}, shape::MPS.MPSShape) where {T} =
     MPSGraphTensorData(matrix.data[], shape, T)
 
+function tensor_dictionary(keys::NSArray, values::Vector{MPSGraphTensorData})
+    objects = NSArray(values)
+    dictionary = @objc [
+        NSDictionary dictionaryWithObjects:(objects::id{NSArray})
+        forKeys:(keys::id{NSArray})
+    ]::id{NSDictionary}
+    return NSDictionary(dictionary)
+end
+
 # Following Laya, encode the cached MPSGraph into Metal's current batch instead
 # of committing a separate command buffer (and flushing kernels) per product.
 # All arrays and Objective-C feed objects stay rooted until GPU completion.
@@ -96,27 +125,23 @@ graph_tensor_data(matrix::Metal.MtlArray{T}, shape::MPS.MPSShape) where {T} =
     cached = @lock PRODUCT_GRAPH_LOCK get!(PRODUCT_GRAPH_CACHE, key) do
         ProductGraph(key)
     end
-    feeds = Dict{MPSGraphTensor,MPSGraphTensorData}(
-        # The MtlArray constructor rebuilds collect/NSNumber/NSArray shape
-        # metadata on every call. Shapes are immutable and already graph-keyed.
-        cached.place_a => graph_tensor_data(a, cached.shape_a),
-        cached.place_b => graph_tensor_data(b, cached.shape_b),
-    )
-    results = Dict{MPSGraphTensor,MPSGraphTensorData}(
-        cached.result => graph_tensor_data(c, cached.shape_c),
-    )
+    # Fixed keys and shapes belong to the graph. Only the tensor-data values
+    # change per product; avoid Julia Dict and its keys/values conversion copies.
+    feed_values = MPSGraphTensorData[
+        graph_tensor_data(a, cached.shape_a),
+        graph_tensor_data(b, cached.shape_b),
+    ]
+    result_values = MPSGraphTensorData[graph_tensor_data(c, cached.shape_c)]
+    feeds = tensor_dictionary(cached.feed_keys, feed_values)
+    results = tensor_dictionary(cached.result_keys, result_values)
     queue = Metal.global_queue(Metal.device())
     Metal.end_encoder!(queue)
     command = MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))
-    MPS.encode!(
-        command,
-        cached.graph,
-        NSDictionary(feeds),
-        NSDictionary(results),
-        nil,
-        default_exec_desc(),
-    )
-    Metal.record_operation!(queue, a, b, c, feeds, results, command)
+    MPS.encode!(command, cached.graph, feeds, results, nil, default_exec_desc())
+    # encode! consumes the autoreleased dictionaries inside this pool. Their
+    # managed tensor-data values remain rooted for the queued GPU operations,
+    # exactly as when those values were held in Julia dictionaries.
+    Metal.record_operation!(queue, a, b, c, feed_values, result_values, command)
     Metal.maybe_autoflush!(queue)
     return c
 end
