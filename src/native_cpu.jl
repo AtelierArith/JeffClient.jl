@@ -14,6 +14,37 @@ function native_mlp(mlp, x::Matrix{Float32})
     return native_linear(mlp.down, cpu_owned_mlp_gate!(gate, up))
 end
 
+function cpu_mlp_workspace(layers, sequence_length)
+    get(ENV, "JEFF_CPU_MLP_WORKSPACE", "0") == "1" || return nothing
+    width = size(first(layers).mlp.gate, 2)
+    all(layer -> size(layer.mlp.gate, 2) == width, layers) || return nothing
+    return (
+        full = (
+            zeros(Float32, width, sequence_length),
+            zeros(Float32, width, sequence_length),
+        ),
+        final = (zeros(Float32, width, 1), zeros(Float32, width, 1)),
+    )
+end
+
+native_mlp(mlp, x::Matrix{Float32}, ::Nothing) = native_mlp(mlp, x)
+function native_mlp(mlp, x::Matrix{Float32}, buffers::Tuple)
+    gate, up = buffers
+    mul!(gate, transpose(mlp.gate), x)
+    mul!(up, transpose(mlp.up), x)
+    return native_linear(mlp.down, cpu_owned_mlp_gate!(gate, up))
+end
+
+function cpu_layer_with_mlp_workspace(layer, x, mask, cfg, buffers)
+    normalized = native_rms(x, layer.input_norm, cfg.eps)
+    mixed =
+        layer.attention.kind == :full ?
+        full_attention(layer.attention, normalized, mask, cfg) :
+        delta_attention(layer.attention, normalized, mask, cfg)
+    residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
+    return native_residual_add!(residual, native_mlp(layer.mlp, normalized, buffers))
+end
+
 function cpu_delta_rms!(output::Matrix{Float32}, weight::AbstractVector{Float32}, eps)
     width = size(output, 1)
     length(weight) == width || throw(DimensionMismatch("RMS weight width differs."))
@@ -81,6 +112,58 @@ function delta_attention(attention, x::Matrix{Float32}, mask, cfg)
     out = Matrix{Float32}(undef, cfg.value_dim * cfg.value_heads, sequence_length)
     groups = cfg.value_heads ÷ cfg.key_heads
     inplace_rms = get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
+    if get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1" && Threads.nthreads(:default) > 1
+        workers = min(Threads.nthreads(:default), cfg.value_heads)
+        @sync for worker = 1:workers
+            Threads.@spawn cpu_delta_heads!(
+                worker:workers:cfg.value_heads,
+                out,
+                q,
+                k,
+                v,
+                beta,
+                decay,
+                z,
+                attention,
+                cfg,
+                groups,
+                inplace_rms,
+            )
+        end
+    else
+        cpu_delta_heads!(
+            1:cfg.value_heads,
+            out,
+            q,
+            k,
+            v,
+            beta,
+            decay,
+            z,
+            attention,
+            cfg,
+            groups,
+            inplace_rms,
+        )
+    end
+    return native_linear(attention.out, out)
+end
+
+function cpu_delta_heads!(
+    heads,
+    out,
+    q,
+    k,
+    v,
+    beta,
+    decay,
+    z,
+    attention,
+    cfg,
+    groups,
+    inplace_rms,
+)
+    sequence_length = size(out, 2)
     state = zeros(Float32, cfg.value_dim, cfg.key_dim)
     full_size = min(64, sequence_length)
     full_buffers = cpu_delta_buffers(cfg, full_size)
@@ -88,7 +171,7 @@ function delta_attention(attention, x::Matrix{Float32}, mask, cfg)
     tail_buffers =
         tail_size == 0 || tail_size == full_size ? full_buffers :
         cpu_delta_buffers(cfg, tail_size)
-    for head = 1:cfg.value_heads
+    for head in heads
         fill!(state, 0.0f0)
         kh = cld(head, groups)
         for start = 1:64:sequence_length
@@ -137,7 +220,7 @@ function delta_attention(attention, x::Matrix{Float32}, mask, cfg)
             destination .= normalized .* native_silu.(@view z[:, head, span])
         end
     end
-    return native_linear(attention.out, out)
+    return nothing
 end
 
 causal_depthwise(input::Matrix{Float32}, weight::AbstractMatrix{Float32}) =
@@ -173,8 +256,11 @@ end
 
 function native_hidden_forward(hidden::Matrix{Float32}, layers, mask, final_norm, cfg)
     isempty(layers) && return native_rms(hidden[:, end:end], final_norm, cfg.eps)
+    workspace = cpu_mlp_workspace(layers, size(hidden, 2))
     for index = 1:(length(layers)-1)
-        hidden = native_layer(layers[index], hidden, mask, cfg)
+        hidden =
+            workspace === nothing ? native_layer(layers[index], hidden, mask, cfg) :
+            cpu_layer_with_mlp_workspace(layers[index], hidden, mask, cfg, workspace.full)
     end
     # Attention consumes the full context. The final MLP is position-wise,
     # and only the last position contributes to Jeff's trained readout.
@@ -186,6 +272,7 @@ function native_hidden_forward(hidden::Matrix{Float32}, layers, mask, final_norm
         delta_attention(layer.attention, normalized, mask, cfg)
     residual = @views hidden[:, end:end] .+ mixed[:, end:end]
     normalized = native_rms(residual, layer.post_norm, cfg.eps)
-    native_residual_add!(residual, native_mlp(layer.mlp, normalized))
+    buffers = workspace === nothing ? nothing : workspace.final
+    native_residual_add!(residual, native_mlp(layer.mlp, normalized, buffers))
     return native_rms(residual, final_norm, cfg.eps)
 end

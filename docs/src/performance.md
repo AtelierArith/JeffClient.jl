@@ -21,7 +21,7 @@ small probability-calibration step in `decide`. Running the demo as a new
 process therefore takes longer than the latency in this table.
 
 Measured on Apple M4 on 2026-10-01, Julia 1.13.1, Metal 1.11.1, and PyTorch
-2.14.0. All rows use Float32 and 20 measured forwards, except the vector-math row (50). OpenBLAS and PyTorch
+2.14.0. All rows use Float32 and 20 measured forwards, except the vector-math and parallel-head rows (50). OpenBLAS and PyTorch
 CPU use 8 threads; Apple Accelerate uses its framework-managed threading
 (10 threads reported on this M4). The LBT/OpenBLAS thread count alone does
 not describe Accelerate's actual thread count.
@@ -35,6 +35,8 @@ Backends were run separately. Speed ratios compare CPU with CPU and GPU with GPU
 | Native Julia CPU, Apple Accelerate | 256 | 533 ms | 573 ms | **5.66×** |
 | Native Julia CPU, Apple Accelerate + padding trim | 101 | 257 ms | 274 ms | **11.72×** |
 | Native Julia CPU, Accelerate + trim + vector math | 101 | 219 ms | 238 ms | **13.78×** |
+| Native Julia CPU, above + MLP workspace + 4 parallel workers | 101 | 190 ms | 198 ms | **15.85×** |
+| Native Julia CPU, above + MLP workspace + 8 parallel workers | 101 | 186 ms | 202 ms | **16.24×** |
 | Original Python / PyTorch MPS | 256 | 364 ms | 375 ms | 1× |
 | Native Julia Metal, default | 256 | 197 ms | 204 ms | **1.85×** |
 | Native Julia Metal, workspace + padding trim | 101 | 89 ms | 93 ms | **4.07×** |
@@ -396,3 +398,56 @@ Remaining CPU work: [workspace reuse (#4)](https://github.com/AtelierArith/JeffC
 and [vector/RMS validation (#6)](https://github.com/AtelierArith/JeffClient.jl/issues/6).
 RMS also passed the 15 prepared-case guards (maximum absolute logit error
 3.40e-5); broader ownership and numerical validation remains.
+
+### CPU MLP workspace and parallel DeltaNet heads
+
+`JEFF_CPU_MLP_WORKSPACE=1` reuses gate/up projection buffers across layers
+within one forward. The final MLP has separate one-token buffers. On the
+parcel input, this reduced heap allocation from 385.5 MB to 321.4 MB; median
+latency remained about 222 ms with the new overflow guard.
+
+`JEFF_CPU_PARALLEL_HEADS=1` distributes independent DeltaNet heads across
+Julia workers. Each worker owns its state and scratch matrices; output slices
+do not overlap. The layer waits for all workers before its output projection.
+Both options are disabled by default and allocate their workspace locally to
+the forward, rather than caching mutable arrays on the backend.
+
+With Accelerate, vector math, trimming and MLP workspace enabled, 50 forwards
+on the same Apple M4 / Float32 / real 0.8B input measured:
+
+| Head execution | Julia workers | Median | p95 | Heap bytes | Allocations |
+|---|---:|---:|---:|---:|---:|
+| Serial | 4 | 225.306 ms | 240.565 ms | 321,368,912 | 13,833 |
+| Parallel | 4 | 190.265 ms | 198.349 ms | 348,846,704 | 17,775 |
+| Parallel | 8 | 185.748 ms | 201.600 ms | 385,451,504 | 22,671 |
+
+Four workers reduced median time by 15.6% against the same-worker serial run.
+Eight workers were slightly faster but allocated more, and had a higher p95.
+Accelerate single-thread mode with eight Julia workers measured 188.755 ms,
+so it was not adopted as the fastest setting.
+
+Parallel execution passed 15 independent prepared-reference cases and
+shape/mask revisits, with two calls per case including a call after full GC.
+Inputs and previously returned scores stayed unchanged; maximum absolute
+logit error was 3.40e-5. JET reported no errors for core and extension methods.
+The sampled parallel profile measured a warm forward of 186.076 ms. These
+checks establish the tested cases, not dataset accuracy or all possible inputs.
+
+```sh
+JEFF_CPU_PARALLEL_HEADS=1 JEFF_CPU_MLP_WORKSPACE=1 JEFF_CPU_VECTOR_MATH=1 \
+JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 \
+julia --threads=8 --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 50 artifacts/benchmarks/native-cpu-parallel.json
+```
+
+Diagnostic tools:
+
+- `tools/inspect_native_cpu_types.jl CHECKPOINT REFERENCE_JSON [all|hidden|workspace|layer|mlp|gate] [typed|source|descend]` inspects CPU types; `descend` requires a terminal.
+- `tools/benchmark_cpu_projections.jl CHECKPOINT REFERENCE_JSON [SAMPLES] [OUTPUT_JSON]` measures representative projections and sweeps through all MLP weights, excluding activation and attention logic.
+- `tools/validate_native_cpu.jl CHECKPOINT REFERENCE_JSON` checks the extended 15-case reference, repeat calls, GC and input/score ownership.
+
+Cthulhu descent through MLP and `mul!` found concrete array and return types.
+The small `Nothing`/workspace union is narrowed in the consuming branch.
+No type-instability fix is claimed. Weight materialization, transposed MLP
+layout and combined gate/up packing were measured and rejected because they
+did not demonstrate a speed improvement. Parallel scratch reuse across layers
+remains a candidate for reducing the increased allocation.

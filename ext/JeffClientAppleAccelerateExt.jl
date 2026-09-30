@@ -20,6 +20,14 @@ function JeffClient.cpu_owned_mlp_gate!(gate::Matrix{Float32}, up::Matrix{Float3
         return invoke(JeffClient.cpu_owned_mlp_gate!, Tuple{Any,Any}, gate, up)
     end
     size(gate) == size(up) || throw(DimensionMismatch("MLP gate shapes differ."))
+    # Check before consuming either array: multiplying first can overflow even
+    # when SiLU(gate) * up is finite. Preserve the scalar expression in that case.
+    @inbounds for index in eachindex(gate, up)
+        product = gate[index] * up[index]
+        if isfinite(gate[index]) && isfinite(up[index]) && !isfinite(product)
+            return invoke(JeffClient.cpu_owned_mlp_gate!, Tuple{Any,Any}, gate, up)
+        end
+    end
     up .*= gate
     gate .= .-gate
     AppleAccelerate.exp!(gate, gate)

@@ -88,6 +88,11 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_parallel_heads_enabled"] =
+                get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1"
+            result["julia_worker_threads"] = Threads.nthreads(:default)
+            result["cpu_mlp_workspace_enabled"] =
+                get(ENV, "JEFF_CPU_MLP_WORKSPACE", "0") == "1"
             result["cpu_inplace_delta_rms_enabled"] =
                 get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
             result["cpu_vector_math_enabled"] = get(ENV, "JEFF_CPU_VECTOR_MATH", "0") == "1"

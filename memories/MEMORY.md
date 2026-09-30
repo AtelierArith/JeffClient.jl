@@ -656,3 +656,68 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - RMS/vector/Accelerate/trimの15ケース各3回benchmarkはexit0、15JSONを確認、最大logit誤差3.3974648e-5。vector/RMSは既定無効。初回guardでありGC/alias/任意入力の網羅的証明ではない。
 - 公開値はvector版50回中央値218.832ms/p95237.897ms、385,531,520bytes/13,945allocations。元Python CPU3015.735ms比13.78倍。RMS218.046msの追加速度差は未証明。
 - 残件: [#4 workspace](https://github.com/AtelierArith/JeffClient.jl/issues/4)、[#5 MLP配置と並列化](https://github.com/AtelierArith/JeffClient.jl/issues/5)、[#6 vector/RMS検証](https://github.com/AtelierArith/JeffClient.jl/issues/6)。owned MLP先行up*gateの極端値overflowは既定採用前に評価する。
+
+## CPU vector gating overflow guard trial
+
+- commit abc3750後の継続調査でgate=[-100,-90,-10,10], up=floatmax(Float32)をJuliaで実行。元のSiLU*upは[-0,-0,-1.5448093e35,Inf]、先行up*gate版は[NaN,NaN,-Inf,Inf]となり問題を再現した。
+- 所有配列を書き換える前に有限入力の積overflowを走査し、該当すれば元のscalar式へinvokeでfallbackする試作をextensionへ追加。同じ入力で元の結果への一致を実行確認。追加走査の全forward性能は未確定であり未commit。
+- real0.8B parcel、vector/Accelerate/trim、50回をcpu-vector-overflow-guard.jsonへ計測中。実行handle93463を継続して確認し、219ms基準と比較する。単一極端値の確認だけで任意入力の数値安全性が解決したとは扱わない。
+
+- handle93463はexit0。50回中央値222.027ms/p95238.991ms/385,531,520bytes/13,945allocations、maxerror1.2398e-5。基準218.832msに対し約1.5%増、分布は重なるが保護走査コストを否定できない。heap増加なし。採用判断にはrepeatと代替式比較が必要。
+
+## CPU MLP packing full-forward trial
+
+- 前goal turnはoverflow再現・保護試作・50回計測でprogress。今回はnative_mlp_weightsのCPU専用packing試作を実装し実際の0.8Bで比較した。gate/upをhcatで結合し、transpose(x)*packedでtoken-major投影、gate半分copy・up半分view、down*transpose(gate)を計算。
+- vector/Accelerate/trimとoverflow guard有効、parcel active101、50回: median219.006ms/p95243.861ms、418,707,072heap bytes/13,945allocations、maxerror1.2398e-5、load0.965s（cpu-packed-mlp-trial.json）。guard有効の非packing222.027ms/p95238.991ms、385,531,520bytesと比べ速度改善は未証明、約33.2MB追加heapとtail増。packing試作は除去した。フラグは実行コマンドで1を指定したがJSONにはpacking設定のfieldなし。
+- 既存ProfileはAccelerate GEMMを主要サンプルとして示す。単純なgate/up結合だけで大きく改善すると推測しない。次はコピーを増やさない投影mul!とforward workspaceを検討する。overflow guardは未commitのまま残る。
+
+## CPU forward-local MLP workspace trial
+
+- JEFF_CPU_MLP_WORKSPACE=1（既定無効）でgate/up投影のMatrixをforward内に所有し、全層のmul!で再利用する試作。最終層は最後のtokenだけのため別1列bufferを所有。層のMLP widthが異なれば通常経路にfallback。永続cacheやtask共有は使わず、入力とresidualを上書きしない。
+- 実0.8B parcel/vector/Accelerate/trim/overflow guard有効、50回median222.239ms/p95224.234ms、321,368,336heap bytes/13,815allocations、maxerror1.2398e-5（cpu-mlp-workspace-trial.json）。guard有効の直前222.027ms/385,531,520bytes/13,945件と比べ速度改善は未証明だが約64.2MB/16.6%のheap削減。
+- このtrialではworkspace設定はコマンドで1を指定し、後からbenchmark JSONにcpu_mlp_workspace_enabledを追加。全ケース・GC/所有・異なるshapeの検証は未完了。JET/Profileをprofile-cpu-mlp-workspace.logに起動、handleは本turnの実行結果を参照して継続確認する。
+
+- 前goal turnはMLP workspace実装/50回計測/Profile起動でprogress。handle27367はexit0、JET No errors detected、warm226.745ms/321,499,408bytes/GC0s。Thread1 886 snapshots、APL_sgemm_QRに468サンプル（inclusiveで重複しうるため他行へ加算しない）。
+- 同backendで15ケースと[1,15,2,1]再訪、各2回（2回目GC.gc(true)後）、logit guard/finite/input不変確認は全て通過、maxerror3.3974648e-5。ただし一時検証スクリプトがfinallyでNativeBackendに存在しないcloseを呼びexit1。推論の失敗ではないがclean exitを得るためclose除去してrepeat起動（cpu-mlp-workspace-validation-repeat.log）。同じhandleを次turnで確認。
+
+## CPU workspace Cthulhu type audit
+
+- ユーザー指定のCthulhuを実行。Julia1.13.1/Cthulhu3.0.2/TypedSyntax1.5.4、real0.8B parcel型、MLP workspace/vector/Accelerate有効。tools/inspect_native_cpu_types.jlを追加しtyped/source/対話descendを再現可能にした。
+- 対話descentでnative_mlp→3引数mul!→5引数mul!→_mul!を辿った。配列型、transpose wrapper、BLAS flag、戻り値は具体型/定数。トップメニューの未使用mul!戻り値::Anyだけで型不安定と判断しない。typed IRではその値を束縛せず、降りた先の戻り値はMatrix{Float32}。
+- 5対象（hidden_forward/workspace/layer/MLP/gate）のtyped IRはcpu-workspace-type-ir.log。hidden/layer/MLP/gateのBodyはMatrix{Float32}。workspaceのみUnion{Nothing,具体NamedTuple}で設定fallbackの小Union、利用branchで絞る。JET core+extension No errors detectedと整合。対象以外の任意型・全入力まで型安定を証明したとは扱わない。
+- MLP workspace数値/所有検証repeat handle82653はexit0、15ケースと[1,15,2,1]再訪、各2回/GC後/input保持を通過、maxerror3.3974648e-5。永続workspaceではなくforward-localである点も含め記録。
+
+- gateもCthulhu対話表示でextension methodのFloat32演算/Matrix戻り値を確認。TypedSyntax sourceはCore.Const(ENV)を環境変数内容まで展開するため、診断ツールのsource/descendでは子プロセスのENVを必要な設定に絞ってから表示する。型確認のdefaultはtyped IR。
+- GEMMのサンプルが多いことだけでBLAS内部packingが原因とは断定しない。Float32を維持した次の候補はロード時の重みmaterialization/配置比較であり、ロード時メモリと全forward時間を測る。
+
+## CPU weight layout trials
+
+- safetensors由来ReshapedArray/ReinterpretArrayの行列をロード時にMatrixへmaterializeする試作はreal0.8B parcel/workspace/vector/Accelerate/trim/guard、50回median222.695ms/p95243.434ms、321,368,144bytes/13,814allocations、maxerror1.2398e-5、load0.984s（cpu-materialized-weights-trial.json）。元workspace222.239ms/load0.782sより速度改善なし。物理配置は同じなのでBLAS packingの改善を証明しない。試作除去。
+- 次にMLPだけpermutedimsをロード時に行いtranspose wrapperで論理weight形状を維持、native_linearのtransposeがunwrapされBLAS N指定となるJEFF_CPU_TRANSPOSE_MLP=1試作を起動。cpu-transposed-mlp-trial.json、実行handleは本turn出力を参照。まだ検証/採用未確定。
+
+- transposeMLP trial handle62284はexit0、50回median222.213ms/p95264.525ms/max363.308ms、321,368,336bytes/13,815allocations、maxerror9.059906e-6、load1.209s。元workspace222.239msと中央値同等、tailとload悪化。transpose配置だけではGEMM改善を証明できず、試作除去。ロード時Matrix化とtransposeMLPのどちらも既定にしない。次は形状別GEMM単独測定とhead/batch分割の費用を定量化する。
+
+## CPU projection and layer-weight sweep benchmarks
+
+- tools/benchmark_cpu_projections.jlを追加。real0.8B/Float32/Accelerate/Apple M4/parcel active101、最初のfull/delta層の実activationsを使ってmul!を各50回測定、出力はpreallocate。モデル全forwardやactivationを含まない。cpu-projections-101.jsonとcpu-projections-101-sweeps.json。
+- 単独GEMM median: delta.qkv1.167ms(1024x6144)、full.q0.879ms(1024x4096)、MLP gate/up各0.809〜0.824ms(1024x3584)、down0.780ms(3584x1024)、delta.z0.439ms、full.k/v0.111ms、delta.a/b0.014ms。全て0Julia heap bytes/0allocations。BLAS内部native allocationsはこの指標では測れない。
+- 24層の異なるMLP weightsを同一zero input101tokensで順に投影するsweepを各50回測定。同一weight連続のcache有利なmicrobenchを補うが、全forwardのキャッシュ状態を再現する証明ではない。gate21.007ms/24（平均0.8753ms）、up20.866ms/24（0.8694ms）、down19.886ms/24（0.8286ms）。全て0heap/0alloc。実forwardの最終層は1tokenだがsweepは全層101tokensなのでそのまま足してforward時間と比較しない。
+- 前turnは重みmaterialization/transposeMLP実測と不採用でprogress、今回も測定ツール追加と投影別/異なる重みsweepでprogress。GEMMラッパーの型やJulia heap割当をこれ以上削るより、DeltaNet headの並列化（scratch所有分離とBLAS oversubscription検証）を次に評価する。
+
+## CPU DeltaNet head parallel trial
+
+- cpu_delta_heads!を抽出し、複数headをworkerごとの範囲で処理する。state/full/tail scratchはhelper callが所有、headの出力領域は重ならず、q/k/v/z/weightsはread-only。threadid依存のcacheは使わず、@syncで全worker完了後にout projectionへ進む。JEFF_CPU_PARALLEL_HEADS=1かつdefault worker>1でのみ有効、既定0。
+- real0.8B parcel/vector/Accelerate/trim/MLP workspace/overflow guard、Julia --threads=4、50回median190.265ms/p95198.349ms、348,846,704heap bytes/17,775allocations、maxerror1.2398e-5（cpu-parallel-heads-4.json）。実行handle11760 exit0。最初のJSONにはparallel設定/worker数fieldがまだなく、後からbenchmarkへ追加。Accelerate auto10、LBT8。
+- 直前workspace222.239msより約14.4%短いが、同worker数の逐次baseline/8worker/Accelerate single/全ケースをまだ比較していない。同--threads4でparallel0の50回をcpu-serial-heads-4.jsonに起動。両helper経路のJET/所有/数値検証も未完了。
+
+- --threads4/parallel0 baseline handle72877はexit0、50回median225.306ms/p95240.565ms、321,368,912bytes/13,833allocations/maxerror1.2398e-5。parallel4の190.265msは同worker設定の逐次版から中央値約15.6%短い。次に--threads8/parallel1の50回をcpu-parallel-heads-8.jsonへ起動し同handleで確認する。
+
+- head並列8workerのhandle84910はexit0。50回median185.748ms/p95201.600ms、385,451,504heap bytes/22,671allocations、maxerror1.2398e-5（cpu-parallel-heads-8.json）。4worker190.265msとの差は約2.4%、heap/件数は増える。autoAccelerate10とJulia8の競合を評価するためAccelerate singleを同8worker/50回で比較開始（cpu-parallel-heads-8-accelerate-single.json）。
+
+- Accelerate single+8worker handle1555はexit0、50回median188.755ms/p95194.849ms、385,451,504bytes/22,671allocations/maxerror1.2398e-5。auto185.748msより中央値改善なし。singleを最速と主張せずautoを維持。
+- tools/validate_native_cpu.jlを追加し、一時スクリプトの検証を再現可能にした。15ケースと[1,15,2,1]再訪、各2回/2回目GC、入力保持と以前返したscore保持を確認する。parallel8設定で起動し、成功後に同設定のProfile/JETを逐次実行する（cpu-parallel-heads-validation.log / profile-cpu-parallel-heads.log）。同じsessionを次turnで確認し、計測を並列に起動しない。
+
+## Parallel CPU commit checkpoint
+
+- 検証+profile session99822はexit0。15ケースと再訪、各2回/GC/input保持/以前返したscores保持は通過、maxerror3.3974648e-5。JET core+extension No errors detected。warm186.076ms/385,451,840bytes/GC0.853ms。worker snapshotsではhead処理が複数workerへ分散。
+- ユーザーの現状commit/push指示に従い、検証済みMLP workspace・head並列化・overflow guardと診断ツールをまとめる。scratch層間再利用の案は未実装。極限最適化完了とは扱わない。READMEのoptional高速CPU設定は8worker+各flag、docsに4/8worker時間・heapのtradeoffを記録。
