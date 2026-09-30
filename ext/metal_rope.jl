@@ -177,13 +177,16 @@ function merge_gate(values, qgate, cfg, length)
         DimensionMismatch("Attention values and gates must match the configured heads."),
     )
     output = pooled_array(Float32, (cfg.head_dim * cfg.heads, length))
-    Metal.@metal threads=(64, 4) groups=(cld(size(output, 1), 64), cld(length, 4)) merge_gate_kernel!(
+    launch_cached_kernel!(
+        merge_gate_kernel!,
         output,
         values,
         qgate,
         Int32(cfg.head_dim),
         Int32(cfg.heads),
-        Int32(length),
+        Int32(length);
+        threads = (64, 4),
+        groups = (cld(size(output, 1), 64), cld(length, 4)),
     )
     return output
 end

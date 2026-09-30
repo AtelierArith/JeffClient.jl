@@ -64,13 +64,16 @@ end
 function JeffClient.causal_depthwise(input::Metal.MtlMatrix{Float32}, weight)
     channels, length = size(input)
     output = pooled_array(Float32, size(input))
-    Metal.@metal threads=(64, 4) groups=(cld(channels, 64), cld(length, 4)) causal_depthwise_kernel!(
+    launch_cached_kernel!(
+        causal_depthwise_kernel!,
         output,
         input,
         weight,
         Int32(channels),
         Int32(length),
-        Int32(size(weight, 1)),
+        Int32(size(weight, 1));
+        threads = (64, 4),
+        groups = (cld(channels, 64), cld(length, 4)),
     )
     return output
 end

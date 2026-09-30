@@ -433,3 +433,11 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 主要幅のPARTSを確定した版はJET6対象すべて報告なし。単体verifierには幅33/64/129/257/512のRMS・gated RMSも追加し、通常macroへ進む幅の数値とGCも検証する。ログは `/private/tmp/jeff-kernel-handles-rms-parts-primitives.log`。GPU算術の変更によって型問題を避けたのではなく、host側の主要幅の分岐で型パラメータを確定している。
 - 増やした幅を含む単体検証と、実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-kernel-handles-rms-parts-validation.log`）。20回の性能比較は `artifacts/metal-validation/benchmark-metal-kernel-handles-rms.json` に保存する。callbackの型分岐の費用も含めて従来と比較する。
 - 型分岐を含む版のB1/L256/active101/F32/workspace有効・20回は **5,043 allocations / 262,704 bytes / 中央値192.809625 ms**、min/p95/max192.233834/193.489541/193.54125 ms。直前5,982 / 308,768から939件 / 46,064 bytes減。workspace447配列 / 857,899,008 bytes、tensor-data/feed vector各199は同じ。直前中央値193.034521 msとの差は小さく、追加の速度改善とは確定しない。この版の通常設定・B2再測定と全割当Profileは未実施であり、既存の公開比較値は前コミットの測定値を維持する。
+- コミット3b70d0cを全割当Profileで再検査し、5,043件、JET6対象すべて報告なしを確認した（`/private/tmp/jeff-kernel-handles-rms-profile.log`）。Core.Box148→81、KernelState206・MPS wrapper13・TD187は変わらない。残る起動サイトはpacked QK pair582件、recurrent487件、causal depthwise309件、query/key RoPE168/167件、softmax109件、merge gate98件。cached launchの1,841件は複数kernelの合計であり、独立した演算の費用ではない。
+
+## Attention の固定引数 kernel handle cache 候補
+
+- RMS版の全割当Profileに基づき、causal depthwise・masked softmax・merge gateの3起動を既存cached launchへ移す候補を追加した。GPU算術・scalar引数・配置は維持する。実行時Valを含むQK/RoPE/recurrentは今回の変更に含めない。単体検証は `/private/tmp/jeff-kernel-handles-attention-primitives.log`。性能と実モデル検証は未完了。
+- 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-kernel-handles-attention-validation.log`）。同条件20回の性能測定を `artifacts/metal-validation/benchmark-metal-kernel-handles-attention.json` に保存する。型検査と割当Profileはこの候補について未実施。
+- B1/L256/active101/F32/workspace有効・20回は **4,983 allocations / 261,744 bytes / 中央値192.805833 ms**。RMS版5,043 / 262,704から60件 / 960 bytes減。min/p95/max192.342959/193.511709/193.91575 ms。18回のdepthwiseと各6回のsoftmax/merge gate、計30起動に対して2件ずつ減る結果で、追加の速度改善はない。JET・全割当Profileは `/private/tmp/jeff-kernel-handles-attention-profile.log` で実行中。
+- 上記Profileは完了し、JET6対象すべて報告なし、全割当記録4,983件を確認した。KernelState206、MPS wrapper13、TD187は変わらない。起動時管理オブジェクトを減らしてもGPU演算・起動数を変えない限り、この条件の全体latencyはほぼ変わらない。

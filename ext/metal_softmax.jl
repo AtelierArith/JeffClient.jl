@@ -50,13 +50,16 @@ function masked_softmax(scores::Metal.MtlArray{Float32,3}, mask, head_dim)
         throw(DimensionMismatch("Attention mask dimensions must match."))
     columns = Base.length(scores) ÷ length
     output = pooled_array(Float32, size(scores))
-    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) masked_softmax_kernel!(
+    launch_cached_kernel!(
+        masked_softmax_kernel!,
         output,
         scores,
         device_mask,
         Int32(length),
         Int32(columns),
-        inv(sqrt(Float32(head_dim))),
+        inv(sqrt(Float32(head_dim)));
+        threads = (32, 8),
+        groups = (cld(columns, 8), 1),
     )
     return output
 end
