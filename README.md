@@ -174,6 +174,46 @@ Total device memory usage has not been measured.
 
 ### Measured inference speed
 
+#### Current results and remaining work
+
+On Apple M4, warmed Float32 inference, including CPU score return, measured:
+
+| Prepared input | Julia Metal configuration | Julia median | Original Python MPS median | Speed ratio |
+| --- | --- | ---: | ---: | ---: |
+| B1/L256, 101 active tokens | Default | 195 ms | 350 ms | 1.8× |
+| Same B1 input | Workspace + leading-padding trim | 86 ms | 350 ms | 4.1× |
+| B2/L512, 512/256 active tokens | Workspace + trim + shape reuse + fused DeltaNet mask | 582 ms | 1,301 ms | 2.2× |
+
+Model loading, compilation and tokenization are excluded. B1 measurements use
+20 samples; the latest B2 Julia measurement uses 50 and Python uses 20. Trimming
+reduces actual computation to 101 tokens for B1 and 512/256 for B2; the logical
+inputs remain the same. The Python reference uses its fallback MPS kernels,
+without the optional FLA or causal-convolution accelerators. These results do
+not establish speedups for every shape or Python configuration.
+
+The Julia model, recurrent DeltaNet and full attention are implemented over
+Metal. Kernel fusion, cached GPU kernels, command-queue reuse, workspace buffers
+and MPS tensor-data reuse remove most of the original host allocation cost.
+Independent PyTorch references pass for 15 cases × 3 repeats, including padding
+and interior mask holes. The six inspected JET targets report no errors; warmed
+allocation profiles record no new MPS tensor-data wrappers with workspaces.
+Allocation reduction alone does not guarantee a latency improvement.
+
+Joint GPU batching remains experimental and disabled by default. It speeds up
+equal-length B2/L1 from 43.9 to 22.8 ms and reduces allocations from 7,751 to
+3,947, but shared padding makes the measured mixed-length L65 and L512 cases
+slower than row-wise trimming. The batch prototype has passed independent model
+and primitive checks, while further configuration validation remains open.
+
+Remaining work is tracked in:
+
+- [#1: batch applicability, configuration and ownership validation](https://github.com/AtelierArith/JeffClient.jl/issues/1)
+- [#2: reduce GPU workspace retention with layer buffer/tensor-data reuse](https://github.com/AtelierArith/JeffClient.jl/issues/2)
+- [#3: reduce remaining kernel-submission heap allocations](https://github.com/AtelierArith/JeffClient.jl/issues/3)
+
+Detailed measurement history follows; findings and conditions are recorded in
+[memories/MEMORY.md](memories/MEMORY.md).
+
 Apple M4, Julia 1.13.1, Metal 1.11.1, PyTorch 2.14.0; pinned Jeff 0.8B,
 batch 1, sequence length 256 (101 active tokens), same prepared English prompt,
 20 warmed forward passes for current Julia Metal and PyTorch MPS Float32;
