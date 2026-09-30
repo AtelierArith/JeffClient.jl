@@ -1,0 +1,10 @@
+[deps]
+JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+JeffClient = {path = ".."}
+
+[compat]
+JSON = "1"

@@ -1,0 +1,33 @@
+# Julia environments resolve independently; keep Project.toml files in Git.
+/Manifest.toml
+/test/Manifest.toml
+/tools/Manifest.toml
+
+# Downloaded checkpoints and exported graphs/weights.
+/models/
+/artifacts/
+
+# Reference checkout: a separate Git repository, not a submodule here.
+/extern/jeff/
+
+# Generated indexes and runtime environments.
+/.codegraph/
+/:memory:.ses
+.CondaPkg/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local credentials and OS/editor leftovers.
+.env
+.env.local
+.DS_Store
+*.swp
+*~
+
+# Julia coverage/allocation reports.
+*.cov
+*.jl.mem
+/coverage/

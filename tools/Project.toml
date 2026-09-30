@@ -1,0 +1,23 @@
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+
+[sources]
+JeffClient = {path = ".."}
+
+[compat]
+BenchmarkTools = "1.8"
+InteractiveUtils = "1.11"
+JET = "0.12"
+JSON = "1"
+LinearAlgebra = "1.13"
+Metal = "=1.11.1"
+Profile = "1.11"
+PythonCall = "0.9"
