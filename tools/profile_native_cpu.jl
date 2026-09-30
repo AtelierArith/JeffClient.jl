@@ -5,6 +5,13 @@ using Profile
 import JSON
 import JET
 
+if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+    Sys.isapple() || error("Apple Accelerate requires macOS.")
+    import AppleAccelerate
+    any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
+        error("Accelerate BLAS forwarding requires macOS 13.4 or later.")
+end
+
 function main()
     length(ARGS) == 2 || error("Usage: profile_native_cpu.jl CHECKPOINT REFERENCE_JSON")
     BLAS.set_num_threads(8)
@@ -14,7 +21,14 @@ function main()
         (name, rows) in sample["inputs"]
     )
     backend = NativeBackend(ARGS[1])
-    println("Julia ", VERSION, "; BLAS threads: ", BLAS.get_num_threads())
+    println(
+        "Julia ",
+        VERSION,
+        "; BLAS threads: ",
+        BLAS.get_num_threads(),
+        "; ",
+        BLAS.get_config(),
+    )
     @code_warntype logits(backend, inputs)
     if JET.JET_AVAILABLE
         show(

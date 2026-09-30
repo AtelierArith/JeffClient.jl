@@ -4,6 +4,13 @@ using LinearAlgebra
 using Profile
 import JSON
 
+if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+    Sys.isapple() || error("Apple Accelerate requires macOS.")
+    import AppleAccelerate
+    any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
+        error("Accelerate BLAS forwarding requires macOS 13.4 or later.")
+end
+
 if length(ARGS) >= 2 && ARGS[2] == "metal"
     import Metal
 end
@@ -62,6 +69,7 @@ function main()
             "cpu" => Sys.cpu_info()[1].model,
             "device" => device == :metal ? string(Metal.device().name) : "CPU",
             "blas_threads" => BLAS.get_num_threads(),
+            "blas_config" => string(BLAS.get_config()),
             "batch_size" => size(inputs["input_ids"], 1),
             "sequence_length" => size(inputs["input_ids"], 2),
             "active_tokens" => vec(sum(inputs["attention_mask"]; dims = 2)),
@@ -77,6 +85,11 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_accelerate_requested"] = get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+            if result["cpu_accelerate_requested"]
+                result["accelerate_version"] = string(pkgversion(AppleAccelerate))
+                result["accelerate_threads"] = AppleAccelerate.get_num_threads()
+            end
             result["cpu_trim_padding_enabled"] =
                 get(ENV, "JEFF_CPU_TRIM_PADDING", "0") == "1"
             result["cpu_computed_sequence_lengths"] = [

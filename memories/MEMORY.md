@@ -617,3 +617,15 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 同変更+CPUtrim（計算長101）中央値673.920ms/p95695.165ms/840,342,656 bytes/66,679allocations、maxerror1.2398e-5。変更前の約2.81倍、元Python CPU3015.735msの約4.47倍。Python側はL256計算なのでpadding演算削減も含む。BLAS1threadsは1195.544ms/p951216.943msで8threadsより遅く、単スレッド化は採用しない。
 - 生データ `artifacts/metal-validation/demo-0.8b-cpu-{fused,trim,trim-blas1}.json`、profile変更前 `profile-cpu-demo.log`、変更後 `profile-cpu-demo-after.log`。CPUscratch再利用/DeltaNet中間配列削減は残る。新しいCPU変更の全入力・モデルへの一般化はこのデモの測定だけで主張しない。
 - 変更後のCPU profilerもexit0。JETはNo errors detected、warm1.768s/2,034,107,424 bytes/GC0.0125s。convolutionの旧slice/broadcast割当は消え、残りの主な割当はmatmulとDeltaNet chunk中間配列。samplingはThread1の7,896 snapshots、Thread2はidleであり二重計上しない。
+
+## 2026-10-01: CPU DeltaNet chunkとApple Accelerate
+
+- CPUの三角解法だけをBLAS.trsm!へ差し替えたtrialはtrim中央値662.218ms（20回）、以前673.920msと範囲が重なるため単独の高速化とは主張しない。その専用delta_solve methodは最終版から除き、CPU chunk内の所有RHSだけを直接trsm!で更新する。
+- CPU専用delta_attentionを実装。共有Q/Kの正規化をvalue headごとに繰り返さず一度行い、chunkはviewで参照。system/intraのdecay broadcastをin-place化し、triangular RHSは直接埋めてsolve、corrections/result/state更新をmul!のalpha/betaで融合。stateはheadごとにzero resetする。pair_decayの式は元のcumulative[i]-cumulative[j]であり、初期trialの符号違いは独立参照guardで検出して修正した。GPU処理は既存methodを使う。
+- OpenBLAS8threads/real0.8B/parcel/20回でuntrim中央値1529.238ms/p951593.114ms/1,277,654,112 bytes/56,036allocations。直前1757.048ms/2.03GBより短い。trimは671.481ms/p95868.609ms/504,848,576 bytes/30,103allocations、maxerror1.2398e-5。直前trim673.920msに対し中央値ほぼ同じ・tail悪化もあり、割当低減だけで速度改善を主張しない。
+- Laya.jlのext/LayaAppleAccelerateExt.jlとsrc/backends.jlを再読。optional AppleAccelerate importでprocess-wideにLBTをAccelerateへforwardする知見を採用。tools依存にAppleAccelerate=0.7.0を追加し、native CPU demo/benchmark/profilerでJEFF_CPU_ACCELERATE=1のときだけimport。macOS13.4以上でforwardを確認し、他OS/unsupported macOSは明示error。コアruntime依存は増やさず、Metal/Python/ONNXにCPUを委譲しない。
+- AccelerateはOpenBLASとthread APIが異なる。LBT/BLAS.get_num_threads()は8だがAppleAccelerate.get_num_threads()は10（framework-managed）。同一8threadsのライブラリ比較とは主張しない。benchmark JSONはblas_config/accelerate_version/accelerate_threadsを保存する。
+- 同real0.8B/Float32/B1L256active101、20回: Accelerate untrim中央値533.254ms/p95572.821ms、trim254.157ms/p95266.436ms、独立repeat trim257.283ms/p95273.999ms。trimは計算長101、最大logit誤差1.1444e-5、割当504,848,576 bytes/30,103件。公開表はrepeat257msを使う。前回trim674msの約2.62倍、元Python CPU3015.735ms比約11.72倍（fallback実装/異なるCPU math kernels/trim演算量削減も含む）。
+- Accelerate+trimの独立reference6caseで各3回benchmarkし、初回reference guardを通過した。英日混在B3、B2L1/65/512、B3interior masksL65/129。最大誤差3.6001205e-5。これは検証入力の数値一致であり分類精度dataset評価ではない。artifact demo-0.8b-cpu-accelerate-case-{1,2,5,12,14,15}.json、benchmark-cpu-accelerate-cases.log。その他主要artifactはdemo-0.8b-cpu-{chunk,chunk-no-trim,accelerate,accelerate-no-trim,accelerate-repeat}.json。
+- 変更後CPU profiler（Accelerate+trim）はexit0、JET No errors detected、warm267.703ms/504,848,576 bytes/GC2.25ms、Profile thread1 1,032snapshots、thread2idle。profile-cpu-accelerate.log。CPU scratch再利用、normalization/activationのvector化は次の候補。
+- optional fast CPU exampleは引数なしHF_HUB_OFFLINE=1で実行済み、Device:cpu/delivery0.996566/confidence0.993133。docs/READMEに任意設定と実測結果を記載し、Documenter build exit0。

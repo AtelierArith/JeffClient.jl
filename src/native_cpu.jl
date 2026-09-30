@@ -1,4 +1,86 @@
 # CPU paths use column-major loops and preserve the generic GPU dispatch.
+function delta_attention(attention, x::Matrix{Float32}, mask, cfg)
+    sequence_length = size(x, 2)
+    masked = x .* reshape(Float32.(mask), 1, :)
+    mixed = causal_depthwise(native_linear(attention.qkv, masked), attention.conv)
+    key_width = cfg.key_dim * cfg.key_heads
+    q = reshape(
+        copy(@view mixed[1:key_width, :]),
+        cfg.key_dim,
+        cfg.key_heads,
+        sequence_length,
+    )
+    k = reshape(
+        copy(@view mixed[(key_width+1):2key_width, :]),
+        cfg.key_dim,
+        cfg.key_heads,
+        sequence_length,
+    )
+    v = reshape(
+        @view(mixed[(2key_width+1):end, :]),
+        cfg.value_dim,
+        cfg.value_heads,
+        sequence_length,
+    )
+    # Q/K heads are shared by multiple value heads. Normalize once, not once
+    # per value head, and let chunk views reference the normalized storage.
+    q ./= sqrt.(sum(abs2, q; dims = 1) .+ 1.0f-6) .* sqrt(Float32(cfg.key_dim))
+    k ./= sqrt.(sum(abs2, k; dims = 1) .+ 1.0f-6)
+    z = reshape(
+        native_linear(attention.z, masked),
+        cfg.value_dim,
+        cfg.value_heads,
+        sequence_length,
+    )
+    beta = native_sigmoid.(native_linear(attention.b, masked))
+    decay =
+        attention.a_decay .*
+        native_softplus.(native_linear(attention.a, masked) .+ attention.dt_bias)
+    out = Matrix{Float32}(undef, cfg.value_dim * cfg.value_heads, sequence_length)
+    groups = cfg.value_heads ÷ cfg.key_heads
+    state = zeros(Float32, cfg.value_dim, cfg.key_dim)
+    for head = 1:cfg.value_heads
+        fill!(state, 0.0f0)
+        kh = cld(head, groups)
+        for start = 1:64:sequence_length
+            span = start:min(start+63, sequence_length)
+            n = length(span)
+            qc = @view q[:, kh, span]
+            kc = @view k[:, kh, span]
+            vc = @view v[:, head, span]
+            bc = @view beta[head:head, span]
+            cumulative = cumsum(@view(decay[head:head, span]); dims = 2)
+            pair_decay = Matrix{Float32}(undef, n, n)
+            for j = 1:n, i = 1:n
+                pair_decay[i, j] = i >= j ? exp(cumulative[i] - cumulative[j]) : 0.0f0
+            end
+            weighted_keys = kc .* bc
+            system = transpose(weighted_keys) * kc
+            system .*= pair_decay
+            exp_decay = exp.(cumulative)
+            values_rhs = Matrix{Float32}(undef, n, cfg.value_dim)
+            values_rhs .= transpose(vc) .* transpose(bc)
+            keys_rhs = Matrix{Float32}(undef, n, cfg.key_dim)
+            keys_rhs .= transpose(weighted_keys) .* transpose(exp_decay)
+            # RHS buffers belong to this chunk and can be overwritten directly.
+            BLAS.trsm!('L', 'L', 'N', 'U', 1.0f0, system, values_rhs)
+            BLAS.trsm!('L', 'L', 'N', 'U', 1.0f0, system, keys_rhs)
+            corrections = copy(transpose(values_rhs))
+            mul!(corrections, state, transpose(keys_rhs), -1.0f0, 1.0f0)
+            intra = transpose(kc) * qc
+            intra .*= transpose(pair_decay)
+            result = state * (qc .* exp_decay)
+            mul!(result, corrections, intra, 1.0f0, 1.0f0)
+            ending_keys = kc .* exp.(cumulative[end] .- cumulative)
+            mul!(state, corrections, transpose(ending_keys), 1.0f0, exp(cumulative[end]))
+            normalized = native_rms(result, attention.norm, cfg.eps; centered = false)
+            destination = @view out[((head-1)*cfg.value_dim+1):(head*cfg.value_dim), span]
+            destination .= normalized .* native_silu.(@view z[:, head, span])
+        end
+    end
+    return native_linear(attention.out, out)
+end
+
 function causal_depthwise(input::Matrix{Float32}, weight::AbstractMatrix{Float32})
     kernel = size(weight, 1)
     channels, sequence_length = size(input)

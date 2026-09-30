@@ -21,14 +21,19 @@ small probability-calibration step in `decide`. Running the demo as a new
 process therefore takes longer than the latency in this table.
 
 Measured on Apple M4 on 2026-10-01, Julia 1.13.1, Metal 1.11.1, and PyTorch
-2.14.0. All rows use Float32 and 20 measured forwards; CPU uses 8 threads.
+2.14.0. All rows use Float32 and 20 measured forwards. OpenBLAS and PyTorch
+CPU use 8 threads; Apple Accelerate uses its framework-managed threading
+(10 threads reported on this M4). The LBT/OpenBLAS thread count alone does
+not describe Accelerate's actual thread count.
 Backends were run separately. Speed ratios compare CPU with CPU and GPU with GPU.
 
 | Backend | Computed tokens | Median per decision | p95 | Speed vs corresponding Python backend |
 | --- | ---: | ---: | ---: | ---: |
 | Original Python / PyTorch CPU | 256 | 3,016 ms | 3,024 ms | 1× |
-| Native Julia CPU | 256 | 1,757 ms | 1,863 ms | **1.72×** |
-| Native Julia CPU, padding trim | 101 | 674 ms | 695 ms | **4.47×** |
+| Native Julia CPU, OpenBLAS | 256 | 1,529 ms | 1,593 ms | **1.97×** |
+| Native Julia CPU, OpenBLAS + padding trim | 101 | 671 ms | 869 ms | **4.49×** |
+| Native Julia CPU, Apple Accelerate | 256 | 533 ms | 573 ms | **5.66×** |
+| Native Julia CPU, Apple Accelerate + padding trim | 101 | 257 ms | 274 ms | **11.72×** |
 | Original Python / PyTorch MPS | 256 | 364 ms | 375 ms | 1× |
 | Native Julia Metal, default | 256 | 197 ms | 204 ms | **1.85×** |
 | Native Julia Metal, workspace + padding trim | 101 | 89 ms | 93 ms | **4.07×** |
@@ -37,7 +42,7 @@ For this input, default Metal takes about 46% less time than Python MPS.
 The optional configuration takes about 75% less time: workspace buffers are
 reused, and the leading padding is removed before computation. Both use the
 same logical input and agree with the independent Python reference. The
-largest absolute Julia logit error in these runs was `1.24e-5`.
+largest absolute Julia logit error for this demo in these runs was `1.24e-5`.
 
 The 89 ms result requires `JEFF_METAL_WORKSPACE=1` and
 `JEFF_METAL_TRIM_PADDING=1`; it is **not the default demo setting**. All other
@@ -65,7 +70,7 @@ classification-accuracy evaluation or a guarantee for other model architectures.
 ### First run versus repeated inference
 
 In these runs, native CPU weight loading took 0.77 s and its first forward
-took 5.01 s. Default Metal loading took 2.25 s and its first forward took
+took 4.88 s with OpenBLAS. Default Metal loading took 2.25 s and its first forward took
 15.29 s. These timings exclude package imports and the checkpoint download;
 the first model download is about 1.7 GB. Keep the loaded backend alive when
 making repeated decisions to amortize loading and compilation.
@@ -102,6 +107,47 @@ JEFF_BLAS_THREADS=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools tools/benchmar
 # CPU-specific code_warntype, JET, Profile and sampled allocation report:
 julia --project=tools tools/profile_native_cpu.jl "$CHECKPOINT" examples/data/parcel_reference.json
 ```
+
+### Further CPU improvement: DeltaNet chunks and Apple Accelerate
+
+The next CPU change normalizes shared Q/K heads once, uses views for chunks,
+performs triangular solves in owned RHS buffers, and uses `mul!` to combine
+products and reuse the recurrent state. With OpenBLAS and no trimming, latency
+fell further from 1,757 to 1,529 ms, and heap bytes from 2.03 to 1.28 GB. With
+trimming, heap bytes fell from 0.84 to 0.50 GB; latency remained about 671 ms
+and the p95 was worse in this run. Less allocation does not guarantee lower
+latency or better tails.
+
+Following Laya.jl's optional CPU backend, importing
+[AppleAccelerate.jl](https://github.com/JuliaLinearAlgebra/AppleAccelerate.jl)
+forwards BLAS to macOS Accelerate through libblastrampoline. The model and
+its DeltaNet/attention logic remain in Julia; this changes the CPU numerical
+library rather than invoking Metal, Python, or ONNX. It is a process-wide BLAS
+switch and requires macOS 13.4 or later. The tools environment includes the
+measured AppleAccelerate 0.7.0; the package's basic CPU environment does not
+require it. Accelerate manages its own threads, separately from OpenBLAS.
+
+With Accelerate, the same demo took 533 ms without trimming. Two 20-sample
+trimmed runs measured 254 and 257 ms; the table uses the repeat run.
+Maximum demo logit error was `1.15e-5`.
+Additional benchmark runs on six independent reference cases covered mixed
+English/Japanese, B2 lengths 1/65/512, and B3 interior masks at lengths 65/129.
+All passed the numerical check; largest absolute error was `3.61e-5`.
+These checks establish agreement on those inputs, not a dataset-wide accuracy
+evaluation. The Python comparison is the original fallback implementation and
+is not an Accelerate-versus-Accelerate microbenchmark.
+
+```bash
+# Fast CPU demo on macOS; set up --project=tools first.
+JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools examples/native_inference.jl
+# Same real model and reference input, 20 samples:
+JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-cpu-accelerate.json
+```
+
+JSON output records both the loaded BLAS libraries and Accelerate's reported
+thread count. The default setting still uses the application's current BLAS;
+it does not automatically import AppleAccelerate. Reusing CPU scratch buffers
+and reducing remaining normalization/activation costs are further candidates.
 
 ### Reproduce the real-checkpoint benchmark
 

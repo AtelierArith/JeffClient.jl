@@ -1,4 +1,5 @@
 [deps]
+AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 Cthulhu = "f68482b8-f384-11e8-15f7-abe071a5a75f"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
@@ -15,6 +16,7 @@ TypedSyntax = "d265eb64-f81a-44ad-a842-4247ee1503de"
 JeffClient = {path = ".."}
 
 [compat]
+AppleAccelerate = "=0.7.0"
 BenchmarkTools = "1.8"
 Cthulhu = "3.0"
 InteractiveUtils = "1.11"
