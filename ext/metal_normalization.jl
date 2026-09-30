@@ -396,6 +396,46 @@ function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered
     end
 end
 
+struct PackedMLP{W}
+    gate_up::W
+    down::W
+end
+
+function JeffClient.native_mlp_weights(::Val{:metal}, gate, up, down)
+    get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1" || return (; gate, up, down)
+    size(gate) == size(up) || throw(DimensionMismatch("MLP weight shapes must match."))
+    # Construction only: the packed backend does not retain the original weights.
+    return PackedMLP(Metal.MtlArray(hcat(Array(gate), Array(up))), down)
+end
+
+function packed_mlp_gate_kernel!(output, packed)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    width = Int32(size(output, 1))
+    if index <= length(output)
+        row = rem(index - Int32(1), width) + Int32(1)
+        column = div(index - Int32(1), width)
+        source = row + Int32(2) * width * column
+        @inbounds output[index] =
+            JeffClient.native_silu(packed[source]) * packed[source+width]
+    end
+    return
+end
+
+function JeffClient.native_mlp(mlp::PackedMLP, x::Metal.MtlMatrix{Float32})
+    packed = JeffClient.native_linear(mlp.gate_up, x)
+    gate = pooled_array(Float32, (size(packed, 1) ÷ 2, size(x, 2)))
+    if !isempty(gate)
+        launch_cached_kernel!(
+            packed_mlp_gate_kernel!,
+            gate,
+            packed;
+            threads = 256,
+            groups = cld(length(gate), 256),
+        )
+    end
+    return JeffClient.native_linear(mlp.down, gate)
+end
+
 function mlp_gate_kernel!(gate, up)
     elements = Int32(length(gate))
     index = Int32(Metal.thread_position_in_grid_1d())

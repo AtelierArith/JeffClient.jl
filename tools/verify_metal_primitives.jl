@@ -159,6 +159,29 @@ function main()
         GC.gc(true)
     end
     println("Validated in-place MLP gate across widths, lengths, and extreme inputs.")
+    for width in (7, 128, 3584), sequence_length in (1, 9)
+        gate_weight = reshape(sin.(Float32.(1:(7width))), 7, width) .* 0.1f0
+        up_weight = reshape(cos.(Float32.(1:(7width))), 7, width) .* 0.1f0
+        down_weight = reshape(sin.(Float32.(1:(3width))), width, 3) .* 0.1f0
+        host = reshape(cos.(Float32.(1:(7sequence_length))), 7, sequence_length)
+        mlp = extension.PackedMLP(
+            Metal.MtlArray(hcat(gate_weight, up_weight)),
+            Metal.MtlArray(down_weight),
+        )
+        expected =
+            transpose(down_weight) * (
+                JeffClient.native_silu.(transpose(gate_weight) * host) .*
+                (transpose(up_weight) * host)
+            )
+        gpu_host = Metal.MtlArray(host)
+        for pass = 1:2
+            actual = Array(JeffClient.native_mlp(mlp, gpu_host))
+            isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
+                error("Packed MLP mismatch.")
+            GC.gc(true)
+        end
+    end
+    println("Validated packed MLP projections against CPU arithmetic after GC.")
     for width in (7, 128, 1024), sequence_length in (1, 9, 65)
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mask = Float32.(isodd.(1:sequence_length))
@@ -303,6 +326,70 @@ function main()
             error("Workspace retains slot indices after clear.")
         !haskey(task_local_storage(), extension.FORWARD_WORKSPACE_KEY) ||
             error("Workspace remains task-local after clear.")
+        gate_weight = reshape(sin.(Float32.(1:35)), 7, 5) .* 0.1f0
+        up_weight = reshape(cos.(Float32.(1:35)), 7, 5) .* 0.1f0
+        down_weight = reshape(sin.(Float32.(1:15)), 5, 3) .* 0.1f0
+        packed_mlp = extension.PackedMLP(
+            Metal.MtlArray(hcat(gate_weight, up_weight)),
+            Metal.MtlArray(down_weight),
+        )
+        previous_slots = nothing
+        previous_data = nothing
+        for sequence_length in (9, 9, 1, 1, 65, 65)
+            host = reshape(cos.(Float32.(1:(7sequence_length))), 7, sequence_length)
+            input = Metal.MtlArray(host)
+            expected =
+                transpose(down_weight) * (
+                    JeffClient.native_silu.(transpose(gate_weight) * host) .*
+                    (transpose(up_weight) * host)
+                )
+            actual = JeffClient.native_forward_scope(input) do
+                JeffClient.native_host(JeffClient.native_mlp(packed_mlp, input))
+            end
+            isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
+                error("Packed workspace MLP mismatch.")
+            workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            length(workspace.slots) ==
+            length(workspace.tensor_data) ==
+            length(workspace.slot_indices) ==
+            3 || error("Packed workspace retains stale slots.")
+            length(workspace.feed_values) == 2 ||
+                error("Packed workspace retains stale feeds.")
+            data = [workspace.tensor_data[objectid(slot)][1] for slot in workspace.slots]
+            if previous_slots !== nothing &&
+               size(first(previous_slots)) == size(first(workspace.slots))
+                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                    error("Packed slots not reused.")
+                all(a === b for (a, b) in zip(previous_data, data)) ||
+                    error("Packed tensor-data not reused.")
+            end
+            for (key, values) in workspace.feed_values
+                all(value === workspace.tensor_data[key][1] for value in values) ||
+                    error("Packed workspace retains input bindings.")
+            end
+            previous_slots, previous_data = copy(workspace.slots), data
+            GC.gc(true)
+        end
+        try
+            JeffClient.native_forward_scope(weight) do
+                JeffClient.native_mlp(packed_mlp, Metal.MtlArray(ones(Float32, 7, 3)))
+                error("packed workspace failure probe")
+            end
+        catch exception
+            exception isa ErrorException &&
+            exception.msg == "packed workspace failure probe" || rethrow()
+        end
+        !workspace.active || error("Packed workspace stays active after exception.")
+        for (key, values) in workspace.feed_values
+            all(value === workspace.tensor_data[key][1] for value in values) ||
+                error("Failed packed workspace retains input bindings.")
+        end
+        extension.clear_forward_workspace!()
+        isempty(workspace.slots) &&
+        isempty(workspace.tensor_data) &&
+        isempty(workspace.slot_indices) &&
+        isempty(workspace.feed_values) ||
+            error("Packed workspace retains objects after clear.")
     finally
         if previous_workspace_setting === nothing
             delete!(ENV, "JEFF_METAL_WORKSPACE")

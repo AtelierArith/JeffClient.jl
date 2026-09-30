@@ -149,7 +149,7 @@ extension methods at that stage.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
 20 warmed synchronized calls: Julia Metal **0.195 s**, original Python MPS
-**0.350 s**. Julia heap: **9,130 allocations / 399,360 bytes**. This is ~12.8×
+**0.350 s**. Julia heap: **8,446 allocations / 364,512 bytes**. This is ~12.8×
 faster than the 2.492 s implementation, with ~99.7% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
@@ -158,14 +158,14 @@ checks cover independent scores, real RMS widths, grouped head layouts,
 partial/full/no RoPE, gates, and cache keys. All six inspected JET targets are
 clean. Direct feed construction reduced allocations by another 15.4% while
 median latency remained unchanged. The latest full workspace allocation profile
-records 4,983 allocations, including 206 KernelState, 187 MPS tensor-data, and
+records 4,112 allocations, including 206 KernelState, no new MPS tensor-data, and
 13 MPS command wrappers. CPU sampling includes GPU waits and does not identify
 GPU kernel internals.
 
 Packed Q/K normalization and direct V recurrent reads remove the three QKV
 slice copies. Primitive checks cover widths 7/128/256 and lengths 1/9/65.
-Current matched batch 2 / length 512 / F32 medians are Julia workspace 765 ms
-and Python 1,301 ms, with 10,190 Julia allocations / 538,400 bytes. Workspace
+Current matched batch 2 / length 512 / F32 medians are Julia workspace 776 ms
+and Python 1,301 ms, with 8,328 Julia allocations / 455,392 bytes. Workspace
 holds 1,766,096,896 device-buffer bytes. Earlier default private cache snapshots
 after trial/GC/trim were 4.06/5.06/4.77 GB; this is not
 peak GPU memory. Completed downloads now trim oversized free caches, while
@@ -175,7 +175,7 @@ Fixed-length MPS pointer storage removes the conversion pointer Vector.
 An opt-in task-local workspace now reuses intermediate arrays, their MPS
 tensor-data, and result value Vectors. Dedicated embedding gather avoids GPU
 index bounds checking after validating host IDs. The prepared B1/L256/F32 case
-measured 4,983 allocations / 261,744 bytes / 193 ms after feed Vector reuse,
+measured 4,112 allocations / 221,200 bytes / 193 ms after feed Vector reuse,
 paired Q/K launch, beta/decay fusion, and dedicated mask/MLP/residual kernels, with 447 arrays retaining
 857,899,008 bytes. RMS launch parameter packing reduced another 201 allocations
 with unchanged bytes; layer-boundary residual/RMS fusion and readout views
@@ -184,6 +184,15 @@ removed another 471 allocations / 4,576 bytes. MPS command wrapper reuse removed
 78 / 2,976 bytes; compiled kernel handle reuse saved another 120 / 1,920 bytes.
 Extending handle reuse to common RMS widths and attention helpers saved
 another 999 / 47,024 bytes without an established latency improvement.
+Q/K, recurrent, and RoPE specialization, past-slot tensor-data reuse, and direct
+matrix gate outputs saved another 871 / 40,544 bytes. Workspace retains 296
+tensor-data objects; the warmed full allocation profile constructs none.
+Experimental `JEFF_METAL_PACKED_MLP=1` reduces matrix submissions and host
+allocations: B1 workspace 4,001 / 203,760 versus 4,112 / 221,200, with roughly
+192.5 versus 193.4 ms medians. Retained device buffers increase by 88,080,384
+bytes (176,160,768 for B2/L512). Latency ranges overlap, so default packing stays
+disabled. Independent 12-case validation, JET, CPU fixtures, and workspace
+identity/GC/exception/clear checks pass.
 The preceding MLP revision also reproduced 193 ms in an
 independent 20-run repeat; residual addition reduced allocation further. Real-model
 12-case × 3-pass validation and GC/identity primitive checks pass.

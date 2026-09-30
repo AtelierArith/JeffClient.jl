@@ -37,6 +37,7 @@ on_native_device(reference::AbstractArray, x::AbstractArray) =
 native_host(x::Array) = x
 native_host(x::AbstractArray) = Array(x)
 native_forward_scope(f, reference) = f()
+native_mlp_weights(device, gate, up, down) = (; gate, up, down)
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
 
@@ -128,10 +129,11 @@ function NativeBackend(checkpoint::AbstractString; device::Symbol = :cpu)
         else
             throw(ArgumentError("Unsupported layer type $kind."))
         end
-        mlp = (
-            gate = get("mlp.gate_proj.weight"),
-            up = get("mlp.up_proj.weight"),
-            down = get("mlp.down_proj.weight"),
+        mlp = native_mlp_weights(
+            Val(device),
+            get("mlp.gate_proj.weight"),
+            get("mlp.up_proj.weight"),
+            get("mlp.down_proj.weight"),
         )
         NativeLayer(
             attention,
@@ -336,12 +338,16 @@ function native_layer_outputs(layer, x, normalized, mask, cfg)
         full_attention(layer.attention, normalized, mask, cfg) :
         delta_attention(layer.attention, normalized, mask, cfg)
     residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
-    gate = native_linear(layer.mlp.gate, normalized)
-    up = native_linear(layer.mlp.up, normalized)
-    mlp = native_linear(layer.mlp.down, native_mlp_gate!(gate, up))
+    mlp = native_mlp(layer.mlp, normalized)
     # residual is owned by this layer; its normalization has already consumed
     # the old values, so reuse it for the final sum on the same device queue.
     return residual, mlp
+end
+
+function native_mlp(mlp, x)
+    gate = native_linear(mlp.gate, x)
+    up = native_linear(mlp.up, x)
+    return native_linear(mlp.down, native_mlp_gate!(gate, up))
 end
 
 function native_hidden_forward(hidden, layers, mask, final_norm, cfg)

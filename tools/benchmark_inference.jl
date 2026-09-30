@@ -77,6 +77,9 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :metal
+            result["metal_workspace_enabled"] = get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1"
+            result["metal_packed_mlp_enabled"] =
+                get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1"
             extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
             isdefined(extension, :metal_pool_stats) &&
                 (result["metal_pool"] = extension.metal_pool_stats())
