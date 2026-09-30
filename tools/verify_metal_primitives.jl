@@ -338,7 +338,7 @@ function main()
         "Validated 8 matrix/batched product combinations × 2 passes with NaN destinations; max error ",
         maximum_error,
     )
-    for width in (8, 128, 256, 1024), centered in (true, false)
+    for width in (8, 33, 64, 128, 129, 256, 257, 512, 1024), centered in (true, false)
         println("Checking RMS width ", width, "; centered ", centered)
         flush(stdout)
         host = reshape(sin.(Float32.(1:(width*6))), width, 2, 3)
@@ -420,7 +420,7 @@ function main()
         GC.gc(true)
     end
     println("Validated fused RMS/RoPE, grouped head layouts, gates, and cache keys.")
-    for width in (8, 128, 256, 1024)
+    for width in (8, 33, 64, 128, 129, 256, 257, 512, 1024)
         host = reshape(sin.(Float32.(1:(width*6))), width, 2, 3)
         host[:, 1, 1] .= 0.0f0
         gate = reshape(12.0f0 .* cos.(Float32.(1:(width*6))), size(host))
@@ -436,7 +436,7 @@ function main()
             GC.gc(true)
         end
     end
-    println("Validated fused RMS/SiLU gates at widths 8/128/256/1024 after GC.")
+    println("Validated fused RMS/SiLU gates at cached and fallback widths after GC.")
     for (width, heads, value_width) in ((7, 2, 3), (128, 2, 7), (256, 1, 9)),
         length in (1, 9, 65)
 

@@ -83,10 +83,131 @@ function normalization_kernel!(
     return
 end
 
-function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
-    width = size(x, 1)
-    columns = length(x) ÷ width
-    output = pooled_array(Float32, size(x))
+function launch_normalization_parts!(
+    output,
+    input,
+    added,
+    residual,
+    weight,
+    gate,
+    eps,
+    factor,
+    ::Val{MEAN},
+    ::Val{CENTERED},
+    ::Val{WEIGHTED},
+    ::Val{RESIDUAL},
+    ::Val{GATED},
+    ::Val{PARTS},
+) where {MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED,PARTS}
+    width = size(input, 1)
+    columns = length(input) ÷ width
+    config = NormalizationConfig{PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}(
+        Float32(eps),
+        Float32(factor),
+        Int32(width),
+        Int32(columns),
+    )
+    launch_cached_kernel!(
+        normalization_kernel!,
+        output,
+        input,
+        added,
+        residual,
+        weight,
+        gate,
+        config;
+        threads = (32, 8),
+        groups = (cld(columns, 8), 1),
+    )
+    return nothing
+end
+
+function launch_normalization!(
+    output,
+    input,
+    added,
+    residual,
+    weight,
+    gate,
+    eps,
+    factor,
+    mean,
+    centered,
+    weighted,
+    residual_flag,
+    gated,
+)
+    width = size(input, 1)
+    if width == 1024
+        return launch_normalization_parts!(
+            output,
+            input,
+            added,
+            residual,
+            weight,
+            gate,
+            eps,
+            factor,
+            mean,
+            centered,
+            weighted,
+            residual_flag,
+            gated,
+            Val(32),
+        )
+    elseif width == 128
+        return launch_normalization_parts!(
+            output,
+            input,
+            added,
+            residual,
+            weight,
+            gate,
+            eps,
+            factor,
+            mean,
+            centered,
+            weighted,
+            residual_flag,
+            gated,
+            Val(4),
+        )
+    elseif width == 256
+        return launch_normalization_parts!(
+            output,
+            input,
+            added,
+            residual,
+            weight,
+            gate,
+            eps,
+            factor,
+            mean,
+            centered,
+            weighted,
+            residual_flag,
+            gated,
+            Val(8),
+        )
+    elseif 0 < width <= 32
+        return launch_normalization_parts!(
+            output,
+            input,
+            added,
+            residual,
+            weight,
+            gate,
+            eps,
+            factor,
+            mean,
+            centered,
+            weighted,
+            residual_flag,
+            gated,
+            Val(1),
+        )
+    end
+    columns = length(input) ÷ width
     config = normalization_config(
         width,
         columns,
@@ -95,17 +216,37 @@ function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
         mean,
         centered,
         weighted,
-        Val(false),
-        Val(false),
+        residual_flag,
+        gated,
     )
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
+        output,
+        input,
+        added,
+        residual,
+        weight,
+        gate,
+        config,
+    )
+    return nothing
+end
+
+function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
+    output = pooled_array(Float32, size(x))
+    launch_normalization!(
         output,
         x,
         nothing,
         nothing,
         weight,
         nothing,
-        config,
+        eps,
+        factor,
+        mean,
+        centered,
+        weighted,
+        Val(false),
+        Val(false),
     )
     return output
 end
@@ -129,10 +270,13 @@ function JeffClient.native_residual_rms(
     )
     residual = pooled_array(Float32, size(x))
     output = pooled_array(Float32, size(x))
-    width, columns = size(x)
-    config = normalization_config(
-        width,
-        columns,
+    launch_normalization!(
+        output,
+        x,
+        mixed,
+        residual,
+        weight,
+        nothing,
         eps,
         1.0f0,
         Val(true),
@@ -140,15 +284,6 @@ function JeffClient.native_residual_rms(
         Val(true),
         Val(true),
         Val(false),
-    )
-    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
-        output,
-        x,
-        mixed,
-        residual,
-        weight,
-        nothing,
-        config,
     )
     return residual, output
 end
@@ -159,12 +294,14 @@ function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps)
         throw(DimensionMismatch("RMS weight width must match the input."))
     size(x, 1) > 4096 && return JeffClient.native_rms(x, weight, eps; centered = false) .*
            JeffClient.native_silu.(gate)
-    width = size(x, 1)
-    columns = length(x) ÷ width
     output = pooled_array(Float32, size(x))
-    config = normalization_config(
-        width,
-        columns,
+    launch_normalization!(
+        output,
+        x,
+        nothing,
+        nothing,
+        weight,
+        gate,
         eps,
         1.0f0,
         Val(true),
@@ -172,15 +309,6 @@ function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps)
         Val(true),
         Val(false),
         Val(true),
-    )
-    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
-        output,
-        x,
-        nothing,
-        nothing,
-        weight,
-        gate,
-        config,
     )
     return output
 end
@@ -191,11 +319,14 @@ function residual_input_rms!(residual, mixed, weight, eps)
     size(residual) == size(mixed) || throw(DimensionMismatch("Residual shapes must match."))
     length(weight) == size(residual, 1) ||
         throw(DimensionMismatch("RMS weight width must match."))
-    width, columns = size(residual)
     output = pooled_array(Float32, size(residual))
-    config = normalization_config(
-        width,
-        columns,
+    launch_normalization!(
+        output,
+        residual,
+        mixed,
+        residual,
+        weight,
+        nothing,
         eps,
         1.0f0,
         Val(true),
@@ -203,15 +334,6 @@ function residual_input_rms!(residual, mixed, weight, eps)
         Val(true),
         Val(true),
         Val(false),
-    )
-    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
-        output,
-        residual,
-        mixed,
-        residual,
-        weight,
-        nothing,
-        config,
     )
     return residual, output
 end
