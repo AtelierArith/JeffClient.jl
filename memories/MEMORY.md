@@ -629,3 +629,30 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - Accelerate+trimの独立reference6caseで各3回benchmarkし、初回reference guardを通過した。英日混在B3、B2L1/65/512、B3interior masksL65/129。最大誤差3.6001205e-5。これは検証入力の数値一致であり分類精度dataset評価ではない。artifact demo-0.8b-cpu-accelerate-case-{1,2,5,12,14,15}.json、benchmark-cpu-accelerate-cases.log。その他主要artifactはdemo-0.8b-cpu-{chunk,chunk-no-trim,accelerate,accelerate-no-trim,accelerate-repeat}.json。
 - 変更後CPU profiler（Accelerate+trim）はexit0、JET No errors detected、warm267.703ms/504,848,576 bytes/GC2.25ms、Profile thread1 1,032snapshots、thread2idle。profile-cpu-accelerate.log。CPU scratch再利用、normalization/activationのvector化は次の候補。
 - optional fast CPU exampleは引数なしHF_HUB_OFFLINE=1で実行済み、Device:cpu/delivery0.996566/confidence0.993133。docs/READMEに任意設定と実測結果を記載し、Documenter build exit0。
+
+## CPU極限チューニング: chunk scratchの層内再利用（作業中）
+
+- active goal CPU実装を極限まで高速化。前turnはCPU chunk改良/Accelerate導入、独立参照と計測、commit7fc0082のためprogressとして扱う。
+- cpu_delta_buffersにpair/system/intra、weighted/ending/scaled_query、RHS2種、corrections/resultをまとめた。full64とtail用の2組を層のforward内に所有し、head/chunk間で再利用。task共有cacheではないので他forwardとの競合はない。beta0のmul!で出力全域を上書きし、RHSとcorrectionsも利用前に完全上書きする。
+- Accelerate+trimのreal0.8B parcel20回は中央値256.270ms/p95265.992ms/385,530,176 bytes/13,903allocations/maxerror1.1444e-5。直前repeat257.283ms/504,848,576 bytes/30,103allocations。速度は範囲が重なるがheap bytes約23.6%、割当数約53.8%減。生JSON demo-0.8b-cpu-chunk-buffers.json。
+- 新scratch経路の15ケース各3回benchmark/reference guardは cpu-buffers-cases.log に実行中。完了確認後にまとめる。変更後のProfile/JETとvector mathの検討は未完了。AppleAccelerate0.7 array.jlにexp!(out::Array,input::Array)があり、次の候補はscalarexp/SiLUを任意のvForce経路へ置き換えること。追加scratchコストと全forwardの数値/速度を測定して判断する。
+- scratch層内再利用の15ケース×各3回benchmarkはexit0、最大logit誤差3.6001205e-5（cpu-buffers-case-{1..15}.json）。active goal前turnはsource変更/20回計測でprogress。今回もvector経路の実装と計測でprogress。
+- AppleAccelerateのoptional extensionを追加（weakdep、compat=0.7.0）。JEFF_CPU_VECTOR_MATH=1のみvForce exp!を使う。最初のSiLU/MLP temp版20回は235.755ms/p95333.474ms/463,913,888 bytes/14,071allocations/maxerror1.1921e-5。中央値は下がるが追加tempとtail増加を認め、既定は無効。
+- MLPの所有gate/upを両方消費するprivate cpu_owned_mlp_gate!へ分離。up*=gateしてgateを負数expへ上書きし、gate=up/(1+exp)を作る。公開でない既存native_mlp_gate!のup保持の挙動は変更しない。これで20回216.671ms/p95223.387ms/430,359,584 bytes/13,999allocations/maxerror1.2398e-5（demo-0.8b-cpu-vector-owned.json）。
+- さらにowned qkv projectionを畳み込み完了後のSiLU exp scratchとして再利用するprivate cpu_owned_causal_depthwiseを追加。通常causal_depthwiseは入力を上書きしない。JEFF_CPU_VECTOR_MATH=0では所有inputもそのままで元のscalar処理。新しいall-owned版50回はdemo-0.8b-cpu-vector-all-owned.jsonに実行中。全ケースでのvector経路の検証・Profile/JET・default無効時の再計測は未完了のためまだcommitしない。
+- all-owned vForce版50回はexit0、中央値218.832ms/p95237.897ms/min214.374ms/max243.410ms/385,531,520 bytes/13,945allocations/maxerror1.2398e-5。vector無効256.270msから中央値約14.6%減、追加scratchのheap増加を解消。50samplesと20samplesの比較なので今後同条件repeatも行う。
+- vector有効15ケース×3回benchmark/reference guardを cpu-vector-owned-cases.log に開始した。Profile/JETとscalar fallback確認はまだ必要。optional flag既定0のまま、目標完了は未証明。
+- all-owned vector mathの15ケース×3回benchmarkはexit0、最大誤差3.3974648e-5（cpu-vector-owned-case-{1..15}.json）。前goal turnは所有配列再利用/50回計測/15case起動でprogress、今回はRMS in-place/Accelerate threading比較/Profilerでprogress。
+- JEFF_CPU_INPLACE_DELTA_RMS=1のprototypeを追加（既定0）。state更新済みで以後raw resultを使わない地点のRMSを、同じ結果bufferへ書く。通常native_rmsの破壊的挙動は変えない。weights幅を検査し、列ごとのsum(abs2,view)とscale/weight乗算。50回は218.046ms/p95236.072ms/369,828,032 bytes/9,931allocations/maxerror1.2398e-5（demo-0.8b-cpu-inplace-rms.json）。既存218.832msと範囲が重なるので速度改善とは主張せず、alloc削減として扱う。RMS1の全ケース確認は未完了。
+- benchmarkにJEFF_CPU_ACCELERATE_THREADSを追加。AppleAccelerate.set_num_threadsは1=single、>1=framework-managedであり厳密n本の指定ではない。all-owned/vector/RMS/trim有効でAccelerate singleの50回中央値219.573ms/p95236.404ms、10thread auto218.046msと同等。単スレッドを高速版として採用しない。
+- profile_native_cpuのJET targetにoptional AppleAccelerate extensionも含めた。初回はJET No errors detected、warm251.278ms/369,959,104 bytes/GC0.938ms。ただしJET依存Reviseのfolder monitorがsoft FD256を超えてbackground EMFILE errorを出した。モデル推論のerrorではないがきれいなprofileにするため、その子shellだけulimit -n4096として再実行中（profile-cpu-vector-owned-fd4096.log）。JULIA_REVISE=manualではfolder watch自体を止めないため代替にしない。
+- child shellのulimit4096再実行もexit0/No errors detected/warm224.139msだったがRevise background EMFILEは残ったため、FD上限だけの回避は不十分と判明。支持されるJULIA_REVISE_POLL=1でfolder monitorを使わない再実行をprofile-cpu-vector-owned-poll.logに開始。pollingによるbackground activityはプロファイル時に区別する。
+- JULIA_REVISE_POLL=1のprofile再実行はexit0、EMFILE/Unhandled task errorなし。core+AppleAccelerate extensionを対象にJET No errors detected。warm225.160ms/369,959,104 bytes/GC0.704ms（profile-cpu-vector-owned-poll.log）。Revise polling background activityとモデルstackを区別し、時間の確定値は別BenchmarkTools trialを使う。
+- RMS in-place1＋vector1＋Accelerate＋trim1の15ケース各3回benchmark/reference guardをcpu-inplace-rms-cases.logに開始。次のturnは同じ実行handleを確認し、terminalと15JSONのmaxerrorを検査する。CPU極限goalは引き続きactive、workspace再利用と行列積のpacking/threading等の候補をまだ監査していない。
+
+## CPU tuning handoff (2026-10-01)
+
+- 現状commit/push・残件Issue化の指示で今回の作業をまとめる。未計測のMLP packing試作は除外。極限最適化が完了したとは扱わない。
+- RMS/vector/Accelerate/trimの15ケース各3回benchmarkはexit0、15JSONを確認、最大logit誤差3.3974648e-5。vector/RMSは既定無効。初回guardでありGC/alias/任意入力の網羅的証明ではない。
+- 公開値はvector版50回中央値218.832ms/p95237.897ms、385,531,520bytes/13,945allocations。元Python CPU3015.735ms比13.78倍。RMS218.046msの追加速度差は未証明。
+- 残件: [#4 workspace](https://github.com/AtelierArith/JeffClient.jl/issues/4)、[#5 MLP配置と並列化](https://github.com/AtelierArith/JeffClient.jl/issues/5)、[#6 vector/RMS検証](https://github.com/AtelierArith/JeffClient.jl/issues/6)。owned MLP先行up*gateの極端値overflowは既定採用前に評価する。

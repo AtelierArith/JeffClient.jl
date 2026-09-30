@@ -31,10 +31,12 @@ function main()
     )
     @code_warntype logits(backend, inputs)
     if JET.JET_AVAILABLE
+        extension = Base.get_extension(JeffClient, :JeffClientAppleAccelerateExt)
+        modules = extension === nothing ? (JeffClient,) : (JeffClient, extension)
         show(
             stdout,
             MIME"text/plain"(),
-            JET.@report_opt target_modules=(JeffClient,) logits(backend, inputs)
+            JET.@report_opt target_modules=modules logits(backend, inputs)
         )
     end
     logits(backend, inputs)

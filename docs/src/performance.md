@@ -21,7 +21,7 @@ small probability-calibration step in `decide`. Running the demo as a new
 process therefore takes longer than the latency in this table.
 
 Measured on Apple M4 on 2026-10-01, Julia 1.13.1, Metal 1.11.1, and PyTorch
-2.14.0. All rows use Float32 and 20 measured forwards. OpenBLAS and PyTorch
+2.14.0. All rows use Float32 and 20 measured forwards, except the vector-math row (50). OpenBLAS and PyTorch
 CPU use 8 threads; Apple Accelerate uses its framework-managed threading
 (10 threads reported on this M4). The LBT/OpenBLAS thread count alone does
 not describe Accelerate's actual thread count.
@@ -34,6 +34,7 @@ Backends were run separately. Speed ratios compare CPU with CPU and GPU with GPU
 | Native Julia CPU, OpenBLAS + padding trim | 101 | 671 ms | 869 ms | **4.49×** |
 | Native Julia CPU, Apple Accelerate | 256 | 533 ms | 573 ms | **5.66×** |
 | Native Julia CPU, Apple Accelerate + padding trim | 101 | 257 ms | 274 ms | **11.72×** |
+| Native Julia CPU, Accelerate + trim + vector math | 101 | 219 ms | 238 ms | **13.78×** |
 | Original Python / PyTorch MPS | 256 | 364 ms | 375 ms | 1× |
 | Native Julia Metal, default | 256 | 197 ms | 204 ms | **1.85×** |
 | Native Julia Metal, workspace + padding trim | 101 | 89 ms | 93 ms | **4.07×** |
@@ -353,3 +354,45 @@ can use the expanded reference document. `tools/benchmark_stages.jl` measures
 synchronized individual stages; those costs are not additive to a full forward.
 Set `JEFF_PROFILE=1` when running `benchmark_inference.jl` for a warmed CPU
 sampling profile. Raw JSON measurements are kept under gitignored `artifacts/`.
+
+### CPU buffer reuse and optional vector math
+
+CPU DeltaNet now reuses chunk scratch matrices across heads and chunks within
+each layer call. On the same real 0.8B parcel input, allocation fell from
+504,848,576 bytes / 30,103 allocations to 385,530,176 bytes / 13,903 allocations.
+Latency remained about 256 ms. These buffers belong to the individual forward.
+
+On macOS, `JEFF_CPU_VECTOR_MATH=1` enables the optional AppleAccelerate extension
+for vector exponentials in SiLU and MLP gating. Disposable projection arrays
+provide scratch storage. With Accelerate and padding trimming, 50 warmed
+forwards measured median **218.832 ms**, p95 **237.897 ms**, and
+385,531,520 heap bytes / 13,945 allocations. This is about 14.6% less time than
+the preceding 256 ms configuration, and 13.78× faster than the measured
+original Python CPU fallback (3,016 ms). The comparison includes different
+math kernels and less padding work; it is not a language-only comparison.
+
+```sh
+JEFF_CPU_VECTOR_MATH=1 JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools examples/native_inference.jl
+JEFF_CPU_VECTOR_MATH=1 JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 50 artifacts/benchmarks/native-cpu-vector.json
+```
+
+Both chunk reuse and vector math passed independent PyTorch logit guards on
+15 prepared cases, including batch inputs, chunk boundaries and interior mask
+holes. Maximum absolute errors were 3.60e-5 and 3.40e-5 respectively. These
+checks do not establish dataset accuracy or arbitrary-input numerical safety.
+Vector math remains disabled by default pending broader validation, including
+extreme activation values and destructive scratch ownership.
+
+The separate experimental `JEFF_CPU_INPLACE_DELTA_RMS=1` reduced allocations
+to 369,828,032 bytes / 9,931 allocations, with median 218.046 ms over 50
+forwards. Timing overlaps the vector-only run, so no additional speedup is
+claimed. It remains disabled by default. Setting
+`JEFF_CPU_ACCELERATE_THREADS=1` in the benchmark gave 219.573 ms; single-thread
+Accelerate did not improve this input. Values above one select framework
+managed threading, rather than an exact thread count.
+
+Remaining CPU work: [workspace reuse (#4)](https://github.com/AtelierArith/JeffClient.jl/issues/4),
+[MLP layout and parallelism (#5)](https://github.com/AtelierArith/JeffClient.jl/issues/5),
+and [vector/RMS validation (#6)](https://github.com/AtelierArith/JeffClient.jl/issues/6).
+RMS also passed the 15 prepared-case guards (maximum absolute logit error
+3.40e-5); broader ownership and numerical validation remains.

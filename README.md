@@ -79,11 +79,11 @@ also compiles GPU kernels, so startup takes longer than subsequent inference.
 ### Faster CPU execution on macOS (optional)
 
 On macOS, an optional CPU configuration uses Apple Accelerate and skips leading
-padding (about 257 ms per warmed forward for this real 0.8B demo on Apple M4):
+padding (about 219 ms per warmed forward for this real 0.8B demo on Apple M4):
 
 ```bash
 julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
-JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools examples/native_inference.jl
+JEFF_CPU_VECTOR_MATH=1 JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools examples/native_inference.jl
 ```
 
 This runs on CPU without Metal. See the performance page for conditions.

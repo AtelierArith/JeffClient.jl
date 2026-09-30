@@ -7,6 +7,9 @@ import JSON
 if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
+    if haskey(ENV, "JEFF_CPU_ACCELERATE_THREADS")
+        AppleAccelerate.set_num_threads(parse(Int, ENV["JEFF_CPU_ACCELERATE_THREADS"]))
+    end
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
         error("Accelerate BLAS forwarding requires macOS 13.4 or later.")
 end
@@ -85,6 +88,9 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_inplace_delta_rms_enabled"] =
+                get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
+            result["cpu_vector_math_enabled"] = get(ENV, "JEFF_CPU_VECTOR_MATH", "0") == "1"
             result["cpu_accelerate_requested"] = get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
             if result["cpu_accelerate_requested"]
                 result["accelerate_version"] = string(pkgversion(AppleAccelerate))
