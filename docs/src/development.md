@@ -6,6 +6,15 @@ Julia 1.13 is the development baseline. CPU tests use a tiny ONNX graph and a sm
 julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
 
+## Continuous integration
+
+The [CI workflow](https://github.com/AtelierArith/JeffClient.jl/blob/main/.github/workflows/CI.yml)
+was generated with PkgTemplates.jl 0.7.63's `GitHubActions` plugin. It runs on
+pushes to `main`, tags, pull requests, and manual dispatch, using Julia 1.13 on
+Ubuntu x64. Julia's build and test actions run the package's existing CPU fixture
+tests. Metal GPU validation remains a separate hardware-dependent workflow.
+Coverage uploads are disabled, so no coverage-service token is required.
+
 ## Build the documentation
 
 Run these commands from the repository root:
