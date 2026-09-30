@@ -1,5 +1,39 @@
 # Inference and accelerators
 
+## Real-checkpoint demo
+
+Run the bundled parcel-classification example from the repository root:
+
+```bash
+julia --project examples/native_inference.jl
+# Or reuse a local checkpoint:
+julia --project examples/native_inference.jl CHECKPOINT_DIRECTORY cpu
+# Apple GPU, using the tools environment that includes Metal:
+julia --project=tools examples/native_inference.jl CHECKPOINT_DIRECTORY metal
+```
+
+The default command resolves the pinned Jeff-Qwen3.5-0.8B checkpoint, downloading
+roughly 1.7 GB only when it is not cached. The example calls `decide` with a real,
+pre-tokenized prompt in `examples/data/parcel.json`. It runs model inference and
+probability calibration in Julia, without Python or an ONNX export.
+
+The CPU example was executed with the actual model weights:
+
+```text
+Device: cpu
+Input: The parcel arrived crushed and the customer wants a replacement.
+Question: Which team should handle this?
+Choice: delivery
+  refund: 0.003434
+  delivery: 0.996566
+Confidence: 0.993133
+```
+
+The fixture's tokens were prepared using the original Jeff tokenizer for revision
+`0f212b3e72acb4dde3f7da61e925d6ab7f819990`. Its option order is refund, then delivery.
+The displayed state is informational: changing it or the question does not
+regenerate tokens. General text tokenization remains outside this API.
+
 ## Prepared-tensor inference
 
 Your graph must output raw option logits of shape `(batch, options)`. Pass
@@ -9,8 +43,6 @@ Set the output name, temperature, and option limit to match your export.
 ```julia
 using JeffClient
 
-backend = ONNXBackend("jeff.onnx";
-    output_name="logits", temperature=1.0, max_options=254)
 question = ChoiceQuestion([
     "refund" => "Refunds and payments",
     "delivery" => "Damaged or lost parcels",
@@ -22,15 +54,15 @@ inputs = Dict(
     "input_ids" => reshape(Int64[101, 102, 103], 1, 3),
     "attention_mask" => ones(Int64, 1, 3),
 )
-try
+ONNXBackend("jeff.onnx";
+    output_name="logits", temperature=1.0, max_options=254) do backend
     result = decide(backend, inputs, question)
     println(result.choice, " ", result.probabilities)
-finally
-    close(backend)
 end
 ```
 
-For a batch, pass an ordered vector of questions corresponding to the output
+The `do` block returns its last expression and releases the ONNX session on
+both normal completion and exceptions. For a batch, pass an ordered vector of questions corresponding to the output
 rows. Yes/no questions use false then true columns. Score questions return an
 expected value on a zero-based scale. Choice confidence follows Jeff's formula
 and is not the same as the winning probability.
@@ -109,4 +141,3 @@ Current limits: float32 text inference, default partial RoPE, bias-free
 projections, and row-wise batch execution by default (experimental joint Metal batching is available). Tokenization, image
 inputs, generation/KV caching, and training are pending. Performance tuning is ongoing.
 Total device memory usage has not been measured.
-

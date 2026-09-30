@@ -14,17 +14,27 @@ julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project examples/prepared_inference.jl
 ```
 
-The demo uses a test graph, not Jeff's trained weights. For a real checkpoint:
+The first demo uses a test graph. To run **Jeff's actual 0.8B weights** on CPU:
 
-```julia
-using JeffClient
-
-checkpoint = resolve_checkpoint("mstrasser/Jeff-Qwen3.5-0.8B";
-    revision="0f212b3e72acb4dde3f7da61e925d6ab7f819990")
-backend = NativeBackend(checkpoint) # CPU
-# import Metal; NativeBackend(checkpoint; device=:metal) for Apple GPU
-# logits(backend, inputs) accepts prepared input_ids and attention_mask.
+```bash
+julia --project examples/native_inference.jl
 ```
+
+This downloads the pinned checkpoint if it is not cached (about 1.7 GB) and uses
+a bundled, pre-tokenized parcel inquiry. Actual CPU demo output:
+
+```text
+Input: The parcel arrived crushed and the customer wants a replacement.
+Question: Which team should handle this?
+Choice: delivery
+  refund: 0.003434
+  delivery: 0.996566
+Confidence: 0.993133
+```
+
+Pass a local checkpoint directory as the first argument to reuse your weights.
+The fixed prompt runs entirely in Julia; editing its text requires regenerating
+the tokens. See [inference examples](docs/src/inference.md) for details and Metal.
 
 ## Documentation
 

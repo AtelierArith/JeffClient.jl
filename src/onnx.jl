@@ -3,6 +3,7 @@ abstract type AbstractDecisionBackend end
 """
     ONNXBackend(path; execution_provider=:cpu, output_name="logits",
                 temperature=1.0, max_options=255, provider_options=(;))
+    ONNXBackend(f, path; kwargs...)
 
 Load a model that returns uncalibrated option logits with shape
 `(batch, options)`. Input tensors are passed through unchanged; this API does
@@ -12,6 +13,14 @@ not tokenize text or load Hugging Face checkpoints. Set `temperature` and
 CPU and CUDA are supported by ONNXRunTime.jl. For CUDA, first import CUDA and
 cuDNN in your environment. Model operator support depends on the provider.
 Call `close(backend)` to release the inference session explicitly.
+Alternatively, use a `do` block to close the session automatically, even if the
+block throws an exception. The block's return value is returned:
+
+```julia
+ONNXBackend("jeff.onnx"; temperature=1.0) do backend
+    decide(backend, inputs, question)
+end
+```
 """
 struct ONNXBackend{S} <: AbstractDecisionBackend
     session::S
@@ -45,6 +54,15 @@ function ONNXBackend(
 end
 
 Base.close(backend::ONNXBackend) = ONNXRunTime.release(backend.session)
+
+function ONNXBackend(f::F, path::AbstractString; kwargs...) where {F}
+    backend = ONNXBackend(path; kwargs...)
+    try
+        return f(backend)
+    finally
+        close(backend)
+    end
+end
 
 """
     decide(backend, inputs, questions)
