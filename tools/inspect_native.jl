@@ -143,6 +143,7 @@ function main()
     records = Profile.Allocs.fetch().allocs
     by_site = Dict{String,Tuple{Int,Int}}()
     by_type = Dict{String,Tuple{Int,Int}}()
+    by_dependency_site = Dict{String,Tuple{Int,Int}}()
     for allocation in records
         relevant = findfirst(
             frame -> occursin("/JeffClient.jl/", string(frame.file)),
@@ -159,6 +160,19 @@ function main()
         key = string(allocation.type)
         count, bytes = get(by_type, key, (0, 0))
         by_type[key] = (count + 1, bytes + allocation.size)
+        dependency = findfirst(
+            frame -> any(
+                package -> occursin("/$(package)/", string(frame.file)),
+                ("Metal", "ObjectiveC", "GPUArrays", "GPUArraysCore"),
+            ),
+            allocation.stacktrace,
+        )
+        if dependency !== nothing
+            frame = allocation.stacktrace[dependency]
+            site = "$(frame.file):$(frame.line) $(frame.func)"
+            count, bytes = get(by_dependency_site, site, (0, 0))
+            by_dependency_site[site] = (count + 1, bytes + allocation.size)
+        end
     end
     println(
         "Sampled allocations: ",
@@ -167,7 +181,11 @@ function main()
         sample_rate,
         "; sizes below are sampled, not totals)",
     )
-    for (label, groups) in (("Sites", by_site), ("Types", by_type))
+    for (label, groups) in (
+        ("Sites", by_site),
+        ("Types", by_type),
+        ("Metal dependency sites", by_dependency_site),
+    )
         println(label, " sorted by sampled allocation count:")
         for (key, value) in first(
             sort!(collect(groups); by = x -> last(x)[1], rev = true),

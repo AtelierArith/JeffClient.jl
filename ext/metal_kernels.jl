@@ -31,7 +31,14 @@ function launch_cached_kernel!(f::F, args::Vararg{Any,N}; threads, groups) where
         kernel_args = map(Metal.mtlconvert, args)
         kernel_type = Tuple{map(Core.Typeof, kernel_args)...}
         kernel = cached_mtlfunction(kernel_f, kernel_type)
-        kernel(args...; threads, groups)
+        workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+        if workspace isa ForwardWorkspace &&
+           workspace.active &&
+           workspace.command_queue.device === kernel.device
+            kernel(args...; threads, groups, queue = workspace.command_queue)
+        else
+            kernel(args...; threads, groups)
+        end
     end
     return nothing
 end

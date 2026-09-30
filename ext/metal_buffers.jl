@@ -99,6 +99,7 @@ end
 # Keep only the last execution's slots; reuse starts after its CPU readback.
 mutable struct ForwardWorkspace
     queue::UInt
+    command_queue::Metal.BatchedCommandQueue
     slots::Vector{Any}
     slot_indices::Dict{UInt,Int}
     tensor_data::Dict{UInt,Vector{MPSGraphTensorData}}
@@ -120,6 +121,7 @@ end
 
 new_forward_workspace(queue) = ForwardWorkspace(
     queue,
+    Metal.global_queue(Metal.device()),
     Any[],
     Dict{UInt,Int}(),
     Dict{UInt,Vector{MPSGraphTensorData}}(),

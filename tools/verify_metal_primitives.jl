@@ -266,6 +266,12 @@ function main()
             input = reshape(cos.(Float32.(1:7sequence_length)), 7, sequence_length)
             device_input = Metal.MtlArray(input)
             actual = JeffClient.native_forward_scope(weight) do
+                extension.launch_cached_kernel!(
+                    captured_kernel_handle_probe(5.0f0),
+                    probe;
+                    threads = 32,
+                    groups = 1,
+                )
                 JeffClient.native_host(JeffClient.native_linear(weight, device_input))
             end
             isapprox(
@@ -275,6 +281,10 @@ function main()
                 rtol = 2.0f-5,
             ) || error("Workspace linear mismatch.")
             workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            workspace.command_queue === queue ||
+                error("Workspace kernel launch uses a different task queue.")
+            all(==(5.0f0), Array(probe)) ||
+                error("Workspace kernel launch did not complete on readback.")
             array = only(workspace.slots)
             values = workspace.tensor_data[objectid(array)]
             feeds = workspace.feed_values[objectid(array)]
