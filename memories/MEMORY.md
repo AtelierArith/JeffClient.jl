@@ -441,3 +441,11 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-kernel-handles-attention-validation.log`）。同条件20回の性能測定を `artifacts/metal-validation/benchmark-metal-kernel-handles-attention.json` に保存する。型検査と割当Profileはこの候補について未実施。
 - B1/L256/active101/F32/workspace有効・20回は **4,983 allocations / 261,744 bytes / 中央値192.805833 ms**。RMS版5,043 / 262,704から60件 / 960 bytes減。min/p95/max192.342959/193.511709/193.91575 ms。18回のdepthwiseと各6回のsoftmax/merge gate、計30起動に対して2件ずつ減る結果で、追加の速度改善はない。JET・全割当Profileは `/private/tmp/jeff-kernel-handles-attention-profile.log` で実行中。
 - 上記Profileは完了し、JET6対象すべて報告なし、全割当記録4,983件を確認した。KernelState206、MPS wrapper13、TD187は変わらない。起動時管理オブジェクトを減らしてもGPU演算・起動数を変えない限り、この条件の全体latencyはほぼ変わらない。
+
+## Attention helper の重複サイズ引数削減候補
+
+- depthwiseのchannels/length/kernel、merge gateのwidth/heads/length、softmaxのlength/columnsを独立scalar引数で渡す代わりに、GPU側のinput/weight/values/scoresのdescriptorから取得する候補を追加した。Int32変換、算術順、配置、配列所有は維持する。単体検証ログは `/private/tmp/jeff-attention-dims-primitives.log`。性能・実モデル・型検査は未完了。
+- 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-attention-dims-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-attention-dims.json` へ保存する。型検査と全割当Profileは未実施。
+- 同条件20回は **4,959 allocations / 259,056 bytes / 中央値193.5626875 ms**、min/p95/max192.756375/194.103042/194.303541 ms。直前4,983 / 261,744から24件 / 2,688 bytes減。中央値は直前192.805833 msより約0.4%長く、分布は重なる。割当削減を速度改善と扱わず、型検査・全割当Profile（`/private/tmp/jeff-attention-dims-profile.log`）後に再測定して採否を判断する。
+- JET6対象すべて報告なし、全割当Profile4,959件。Int32は186→162件で総割当数の減少24件と一致し、KernelState206・MPS wrapper13・TD187は変わらない。配列descriptorの再利用によりサイズscalarのboxingと引数tupleのbytesを減らした結果。再測定を `artifacts/metal-validation/benchmark-metal-attention-dims-repeat.json` に保存する。
+- 再測定も4,959 / 259,056、中央値194.1110625 ms、min/p95/max193.263291/194.55525/194.640625 ms。候補を退避して直前コミット648a1e1を再測定すると4,983 / 261,744、中央値193.3279165 ms、min/p95/max192.541667/193.974083/193.977167 ms（`artifacts/metal-validation/benchmark-metal-attention-handles-control.json`）。測定順は候補→候補→controlで無作為交互比較ではなく、分布も重なるため確定的なGPU速度退行とはしない。ただし候補の中央値は2回ともcontrolより約0.4%長く、割当削減24件のために採用する根拠は不足。3ファイルを648a1e1へ戻し、サイズ引数削減は不採用とした。前のdelta gate/mask/MLPのサイズ引数削減まで撤回する根拠ではない。
