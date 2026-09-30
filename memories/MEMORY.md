@@ -606,3 +606,14 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 最大絶対logit誤差: CPU1.049e-5、Metal既定6.676e-6、trim7.629e-6。先頭mask0のみ除去し有効tokenは残す。今回と既存の参照検証の数値一致は確認したが、大規模な分類精度評価とは区別する。
 - Julia CPU loading0.780s/first forward5.349s、Metal既定2.247s/15.290s。package import/downloadはこの時間に含まれない。
 - 元Jeff commit `f06788292874c21a5b5c41549ac220dd9e15da7f`、FLA/causal-conv1dなしのPyTorch fallback。MLX比較ではない。生JSONはignored `artifacts/metal-validation/demo-0.8b-{cpu,metal,metal-trim,python-cpu,python-mps}.json`。公開表・再実行手順は `docs/src/performance.md`。
+
+## 2026-10-01: GPUの知見をCPUへ適用
+
+- CPU専用 `tools/profile_native_cpu.jl` を追加。@code_warntype/JET、warm @timed、5 forwardsのProfile、5%のProfile.Allocsを記録。変更前JETはNo errors detected。warm1.856s/3,066,053,744 bytes/GC0.0168s。CPU8,350 snapshotsの中にBLAS GEMM、triangular solve、exp、sliceコピーがある。サンプルbyte上位はcausal_depthwiseのslice broadcast（native.jl旧241、244）、次にmatmul。sampled bytesを総割当や時間比率と混同しない。
+- `src/native_cpu.jl` にMatrix{Float32}専用畳み込みを追加。tap順を保持してcolumn-major loopで既存outputへ直接加算しSiLUをin-place適用。channel数を検査してから@inboundsを使う。GPUのgeneric methodは保持。
+- CPUのhidden forwardでは最後の層のAttentionまでは全系列を計算し、最後のresidual/RMS/MLPだけ最終columnにする。MLPは位置ごとに独立でreadoutが最終columnしか消費しない。Metalで使った知見をCPUに移した。CPU重みはReinterpret/ReshapeでもProfileでは既にBLASへ到達しており、重量の形式だけを変える必要は確認されていない。
+- `JEFF_CPU_TRIM_PADDING=1` を追加（既定0）。先頭mask0のみ除去、interior holesは残す。Metalの同名でないflagと独立。benchmarkはCPU計算長とtrim flagを記録し、`JEFF_BLAS_THREADS`（既定8）でCPU threadを変えられる。
+- real0.8B parcel、B1/L256/active101、Float32、各20回、8BLASthreads:変更前中央値1893.106ms/3,060,843,632 bytes/126,111allocations→変更後1757.048ms/2,034,107,424 bytes/125,408allocations。約7.2%latency減、約33.5%heap bytes減。p951863.412ms、最大logit誤差1.1444e-5。
+- 同変更+CPUtrim（計算長101）中央値673.920ms/p95695.165ms/840,342,656 bytes/66,679allocations、maxerror1.2398e-5。変更前の約2.81倍、元Python CPU3015.735msの約4.47倍。Python側はL256計算なのでpadding演算削減も含む。BLAS1threadsは1195.544ms/p951216.943msで8threadsより遅く、単スレッド化は採用しない。
+- 生データ `artifacts/metal-validation/demo-0.8b-cpu-{fused,trim,trim-blas1}.json`、profile変更前 `profile-cpu-demo.log`、変更後 `profile-cpu-demo-after.log`。CPUscratch再利用/DeltaNet中間配列削減は残る。新しいCPU変更の全入力・モデルへの一般化はこのデモの測定だけで主張しない。
+- 変更後のCPU profilerもexit0。JETはNo errors detected、warm1.768s/2,034,107,424 bytes/GC0.0125s。convolutionの旧slice/broadcast割当は消え、残りの主な割当はmatmulとDeltaNet chunk中間配列。samplingはThread1の7,896 snapshots、Thread2はidleであり二重計上しない。

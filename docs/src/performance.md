@@ -27,7 +27,8 @@ Backends were run separately. Speed ratios compare CPU with CPU and GPU with GPU
 | Backend | Computed tokens | Median per decision | p95 | Speed vs corresponding Python backend |
 | --- | ---: | ---: | ---: | ---: |
 | Original Python / PyTorch CPU | 256 | 3,016 ms | 3,024 ms | 1× |
-| Native Julia CPU | 256 | 1,893 ms | 2,062 ms | **1.59×** |
+| Native Julia CPU | 256 | 1,757 ms | 1,863 ms | **1.72×** |
+| Native Julia CPU, padding trim | 101 | 674 ms | 695 ms | **4.47×** |
 | Original Python / PyTorch MPS | 256 | 364 ms | 375 ms | 1× |
 | Native Julia Metal, default | 256 | 197 ms | 204 ms | **1.85×** |
 | Native Julia Metal, workspace + padding trim | 101 | 89 ms | 93 ms | **4.07×** |
@@ -36,7 +37,7 @@ For this input, default Metal takes about 46% less time than Python MPS.
 The optional configuration takes about 75% less time: workspace buffers are
 reused, and the leading padding is removed before computation. Both use the
 same logical input and agree with the independent Python reference. The
-largest absolute Julia logit error in these runs was `1.05e-5`.
+largest absolute Julia logit error in these runs was `1.24e-5`.
 
 The 89 ms result requires `JEFF_METAL_WORKSPACE=1` and
 `JEFF_METAL_TRIM_PADDING=1`; it is **not the default demo setting**. All other
@@ -63,11 +64,44 @@ classification-accuracy evaluation or a guarantee for other model architectures.
 
 ### First run versus repeated inference
 
-In these runs, native CPU weight loading took 0.78 s and its first forward
-took 5.35 s. Default Metal loading took 2.25 s and its first forward took
+In these runs, native CPU weight loading took 0.77 s and its first forward
+took 5.01 s. Default Metal loading took 2.25 s and its first forward took
 15.29 s. These timings exclude package imports and the checkpoint download;
 the first model download is about 1.7 GB. Keep the loaded backend alive when
 making repeated decisions to amortize loading and compilation.
+
+### Applying GPU optimization lessons to CPU
+
+CPU profiling found that convolution slice copies and broadcast temporaries
+were large allocation sources. The CPU implementation now accumulates
+convolution results directly into its output buffer and applies SiLU in place.
+As in Metal, the final layer's position-wise MLP computes only the last token;
+its attention still reads the full context. JET reported no errors before
+the change: type stability alone did not remove the allocation cost.
+
+With 8 BLAS threads and no padding trim, these changes reduced the demo's
+median from 1,893 to 1,757 ms and heap allocation bytes from 3.06 to 2.03 GB
+per forward. `JEFF_CPU_TRIM_PADDING=1` further reduced the measured median to
+674 ms and heap allocation bytes to 0.84 GB. These bytes are cumulative
+allocations per call, not resident memory. Trim remains disabled by default
+and removes only the leading zero-mask prefix. Maximum absolute logit error
+was `1.24e-5` with CPU trimming.
+
+MPS tensor-data and command-queue reuse are specific to Metal. CPU still has
+scope for reusable scratch arrays, fewer DeltaNet chunk temporaries, and BLAS
+thread tuning. The sampled CPU profile includes triangular solves and BLAS
+matrix products, as well as element-wise exponentials and slice copying.
+For this trimmed demo, reducing BLAS to one thread increased the median to
+1,196 ms, versus 674 ms with eight threads (20 samples each). Fewer threads
+are therefore not automatically faster.
+
+```bash
+JEFF_CPU_TRIM_PADDING=1 julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-cpu-trim.json
+# Change benchmark BLAS threads independently; default is 8.
+JEFF_BLAS_THREADS=1 JEFF_CPU_TRIM_PADDING=1 julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-cpu-trim-blas1.json
+# CPU-specific code_warntype, JET, Profile and sampled allocation report:
+julia --project=tools tools/profile_native_cpu.jl "$CHECKPOINT" examples/data/parcel_reference.json
+```
 
 ### Reproduce the real-checkpoint benchmark
 

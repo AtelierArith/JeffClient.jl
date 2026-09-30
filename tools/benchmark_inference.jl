@@ -32,7 +32,7 @@ function main()
         Metal.functional() || error("A functional Apple GPU is required.")
         Metal.allowscalar(false)
     end
-    BLAS.set_num_threads(8)
+    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
     references = JSON.parsefile(ARGS[3])
     cases = references isa AbstractDict ? references["cases"] : references
     sample = cases[index]
@@ -76,6 +76,17 @@ function main()
             "median_julia_allocations" => median_estimate.allocs,
             "max_logit_error" => max_error,
         )
+        if device == :cpu
+            result["cpu_trim_padding_enabled"] =
+                get(ENV, "JEFF_CPU_TRIM_PADDING", "0") == "1"
+            result["cpu_computed_sequence_lengths"] = [
+                size(inputs["input_ids"], 2) - JeffClient.native_sequence_start(
+                    backend.embedding,
+                    inputs["attention_mask"],
+                    row,
+                ) + 1 for row in axes(inputs["input_ids"], 1)
+            ]
+        end
         if device == :metal
             result["metal_batched_enabled"] = get(ENV, "JEFF_METAL_BATCHED", "0") == "1"
             result["metal_workspace_enabled"] = get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1"

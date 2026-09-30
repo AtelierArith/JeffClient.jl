@@ -14,6 +14,8 @@ IDs and masks; tokenization is not part of this API. Only float32 inference,
 default partial RoPE, and bias-free projections are currently supported.
 
 Use `device=:metal` after importing Metal for Apple GPU execution.
+For CPU, `JEFF_CPU_TRIM_PADDING=1` optionally skips leading zero-mask positions
+without removing active tokens or interior mask holes. It is disabled by default.
 """
 struct NativeBackend{E,R,L,N,C} <: AbstractDecisionBackend
     embedding::E
@@ -38,7 +40,14 @@ native_host(x::Array) = x
 native_host(x::AbstractArray) = Array(x)
 native_forward_scope(f, reference) = f()
 native_forward_scope(f, reference, sequence_length) = native_forward_scope(f, reference)
-native_sequence_start(reference, mask, row) = first(axes(mask, 2))
+function native_sequence_start(reference, mask, row)
+    start = first(axes(mask, 2))
+    get(ENV, "JEFF_CPU_TRIM_PADDING", "0") == "1" || return start
+    while start < last(axes(mask, 2)) && mask[row, start] == 0
+        start += 1
+    end
+    return start
+end
 native_batch_logits(backend, ids, mask) = nothing
 native_mlp_weights(device, gate, up, down) = (; gate, up, down)
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]

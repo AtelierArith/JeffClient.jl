@@ -15,5 +15,6 @@ include("onnx.jl")
 include("hub.jl")
 include("safetensors.jl")
 include("native.jl")
+include("native_cpu.jl")
 
 end # module JeffClient
