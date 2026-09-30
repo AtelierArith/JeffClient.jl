@@ -189,3 +189,41 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - Julia Metal 中央値 **806.1352295 ms**、original Python MPS F32 **1338.6191045 ms**。この条件では Julia の中央値が約 39.8% 短い。original Python は FLA/causal-conv1d がなく PyTorch 参照実装を使う条件の比較であり、他の実装や入力へ一般化しない。
 - Julia は **34,546 allocations / 1,545,760 bytes**、min/p95/max **780.5/988.8/1001.7 ms**。Python は **1294.4/1344.2/1422.5 ms**。数値誤差も参照許容範囲内（Python 最大 `1.7881393e-5`）。Julia pool は GC 後 **4,911,136,768**、縮小後 **4,763,287,552 bytes**。
 - 記録は `artifacts/metal-validation/benchmark-metal-b2-l512.json` と `benchmark-python-b2-l512.json`。長い系列でも改善を確認したが、Julia の実 batch 化と tail latency には改良の余地がある。
+
+## DeltaNet 出力の RMS と SiLU gate の融合
+
+- 正規化カーネルに `Val{GATED}` specialization を追加し、RMS の weight 乗算後に `native_silu(gate)` を掛けて保存する。正規化だけの中間出力と後続 broadcast 起動を除いた。通常 RMS/L2 と residual RMS では gate に `nothing` を渡し `Val(false)` で分岐を除く。
+- 実モデル 12 ケース × 3 回は通り、最大 logit 誤差は引き続き `3.361702e-5`。ログは `/private/tmp/jeff-rms-gate-validation.log`。
+- 同条件 20 回で **16,227 allocations / 722,768 bytes / 中央値 199.3218955 ms**。直前の 17,012 / 763,040 から約 4.6% / 5.3% 減。min/p95/max は 197.4/228.2/337.7 ms。中央値 200.6846455 → 199.3218955 ms の差を速度改善の確証とはしない。記録は `artifacts/metal-validation/benchmark-metal-rms-gate.json`。
+- pool の trial/GC/trim 後は **4,067,426,304 / 5,100,437,504 / 4,766,990,336 bytes**。保持 GPU メモリの改善は確認できない。
+- RMS+gate の単体検証に幅 8/128/256/1024、3D head/token 配列、ゼロ入力列、正負の gate（約 ±12）、正負の weight、GC を挟む 2 回実行を追加した。CPU RMS と SiLU の式に一致し、既存プリミティブ検証も通った。ログは `/private/tmp/jeff-rms-gate-primitives.log`。
+- 融合後も JET 6 対象は報告なし。Profile.Allocs 10% は 1,876 サンプルで、pool の DataRef/MtlArray 生成 3 箇所は計 523、tensor dictionary は 183、packed Q/K 起動 117、層末尾 residual broadcast 96、RMS gate 起動 68。管理ラッパーと MPS submission が依然として残る。サンプル比率は実行時間の比率ではない。次は層内で所有する residual への in-place 加算と reusable workspace を検討する。ログは `/private/tmp/jeff-rms-gate-profile.log`。
+
+## 層末尾の residual 加算を in-place 化
+
+- 層内で新規生成した residual へ `residual .+= mlp` と書き込み、同じ配列を返す形にした。呼び出し元の入力と重みは変更しない。正規化・MLP の先行読み取りを同じ queue へ投入した後の書き込みなので、処理順序を保持する。
+- CPU fixture 5 入力と Metal 実モデル 12 ケース × 3 回は通った。最大 logit 誤差は CPU `3.874302e-7`、Metal `3.361702e-5`。Metal ログは `/private/tmp/jeff-residual-inplace-validation.log`。
+- 同条件 20 回は **15,939 allocations / 714,320 bytes / 中央値 203.5682295 ms**。直前 16,227 / 722,768 から 288 allocations / 8,448 bytes 減。min/p95/max は 198.5/273.7/342.1 ms。直前中央値 199.3218955 ms に対して速度改善は確認できない。記録は `artifacts/metal-validation/benchmark-metal-residual-inplace.json`。
+- pool の trial/GC/trim 後は **673,808,384 / 6,335,201,280 / 4,765,483,008 bytes**。snapshot に大きな差が出るため、trial 直後の値だけを GPU メモリ改善の証拠にしない。常時保持量と peak の改善は未確認。
+
+## MLP gate 射影配列の in-place 再利用
+
+- `native_mlp_gate!` は層内の gate 射影へ SiLU と up 乗算の結果を書き込み、同じ配列を down 射影へ渡す。従来の活性化結果用 pooled output は不要になる。関数名の `!` で gate を変更する契約を明示した。入力 hidden とモデル重みは変更しない。
+- Metal 実モデル 12 ケース × 3 回は通り、最大 logit 誤差 `3.361702e-5`。ログは `/private/tmp/jeff-mlp-inplace-validation.log`。変更後の速度・割当と CPU 検証は次に行う。
+- CPU fixture の 5 入力も通り、最大 logit 誤差 `3.874302e-7`。同条件の Metal 20 回計測は **15,771 allocations / 708,944 bytes / 中央値 202.657625 ms**。直前の 15,939 / 714,320 から 168 allocations / 5,376 bytes 減。min/p95/max は 199.4/216.5/433.4 ms。速度と tail latency の改善は確認できない。記録は `artifacts/metal-validation/benchmark-metal-mlp-inplace.json`。
+- pool の trial/GC/trim 後は **1,712,029,696 / 5,996,544,000 / 4,765,515,776 bytes**。配列一つの生成を省いても、ホストの kernel 起動・MPS submission と GC 依存の保持量は残る。
+- in-place residual/MLP を含む最終状態でも JET 6 対象は報告なし。ログは `/private/tmp/jeff-mlp-inplace-types.log`。
+
+## NSArray の値配列変換に残るポインタ Vector
+
+- `tensor_dictionary` の `NSArray(values)` を ObjectiveC.jl の実装で追跡した。`foundation.jl` の `NSArray(::Vector{<:Object})` は `arrayWithObjects:count:` を呼び、`syntax.jl` の `Base.cconvert(::Type{<:id}, ::Vector{<:Object})` が `idArray([pointer(obj) for obj in objs], objs)` を生成する。
+- このため既存の `Vector{MPSGraphTensorData}` に加え、Objective-C ポインタの Vector が feed と result ごとに一つ生成される。具体型でも変換用コンテナの割当は消えない。MPS の値配列・tensor-data の生成をすべて除けたわけではない。
+- feed 2 個・result 1 個を固定長のポインタ領域で渡す方法を次に検討する。C 呼び出し中はポインタ領域と元の managed tensor-data を GC から保護し、GPU 完了までは元の値を queue roots に保持する。ポインタ保持領域の寿命と GPU オブジェクトの寿命は別に扱う。実装変更の効果はまだ未計測。
+- `Val(2)` / `Val(1)` の固定長 tuple を Ref に保持し、`GC.@preserve values storage` 内で `arrayWithObjects:count:` に渡す実装へ変更した。元の値 vector は queue roots に残し、変換用ポインタ Vector のみ除いた。固定長 Ref も必ず無割当になるとは主張せず、全体の実測で判断する。
+- 既存プリミティブ検証と実モデル 12 ケース × 3 回は通り、最大 logit 誤差は `3.361702e-5`。ログは `/private/tmp/jeff-fixed-pointer-primitives.log` と `/private/tmp/jeff-fixed-pointer-validation.log`。
+- 同条件 20 回で **14,179 allocations / 651,632 bytes / 中央値 202.7504165 ms**。直前の 15,771 / 708,944 から割当数約 10.1%、bytes 約 8.1% 減。min/p95/max は 198.3/217.4/369.2 ms。中央値は直前 202.657625 ms と同程度で、速度改善は確認できない。記録は `artifacts/metal-validation/benchmark-metal-fixed-pointer.json`。
+- 続いて元の managed tensor-data の feed/result 値 Vector も、2 個/1 個の tuple に置き換えた。`tensor_dictionary` は `NTuple{N,MPSGraphTensorData}` を受け取る。元の tuple を queue roots に保持し、ポインタ Ref は C 呼び出し中だけ `GC.@preserve` で保護する。tuple の boxing と tensor-data 生成まで無割当になるとは主張しない。
+- tuple 版の既存プリミティブ検証と実モデル 12 ケース × 3 回は通り、最大 logit 誤差は `3.361702e-5`。ログは `/private/tmp/jeff-tuple-feed-primitives.log` と `/private/tmp/jeff-tuple-feed-validation.log`。tuple 版の速度・割当は次に計測する。
+- tuple 版は **14,776 allocations / 696,208 bytes / 中央値 203.4739585 ms**。直前の値 Vector＋固定長ポインタ領域版 14,179 / 651,632 より割当が増えたため、値の保持を Vector に戻した。変換用ポインタ Vector の削減は維持する。tuple 化すれば常に割当が減るわけではなく、FFI・GC 保護・queue roots を含む経路で確認する必要がある。増加の正確な内訳は未確定。
+- tuple 版でも JET 6 対象は報告なし。記録は `artifacts/metal-validation/benchmark-metal-tuple-feed.json` と `/private/tmp/jeff-tuple-feed-profile.log`。型安定性だけでは割当の退行を検出できない。
+- 採用する値 Vector＋固定長ポインタ領域版に戻した状態でも JET 6 対象は報告なし。ログは `/private/tmp/jeff-fixed-pointer-types.log`。公開性能表は採用版の 14,179 allocations / 651,632 bytes / 202.7504165 ms に更新した。

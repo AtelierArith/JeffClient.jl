@@ -1,15 +1,5 @@
 # One logical 32-lane SIMD group normalizes a column. Fixed-size tuples keep
 # inputs in registers through the reduction and output, without scratch arrays.
-function JeffClient.native_mlp_gate(
-    gate::Metal.MtlMatrix{Float32},
-    up::Metal.MtlMatrix{Float32},
-)
-    size(gate) == size(up) || throw(DimensionMismatch("MLP gate and up shapes must match."))
-    output = pooled_array(Float32, size(gate))
-    output .= JeffClient.native_silu.(gate) .* up
-    return output
-end
-
 function normalization_kernel!(
     output,
     input,
@@ -25,7 +15,9 @@ function normalization_kernel!(
     ::Val{CENTERED},
     ::Val{WEIGHTED},
     ::Val{RESIDUAL},
-) where {PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL}
+    gate,
+    ::Val{GATED},
+) where {PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}
     local_index = Metal.thread_position_in_threadgroup_2d()
     group = Metal.threadgroup_position_in_grid_2d().x
     lane = Int32(local_index.x)
@@ -63,6 +55,9 @@ function normalization_kernel!(
                     w = CENTERED ? 1.0f0 + weight[row] : weight[row]
                     normalized *= w
                 end
+                if GATED
+                    normalized *= JeffClient.native_silu(gate[offset+row])
+                end
                 output[offset+row] = normalized
             end
         end
@@ -88,6 +83,8 @@ function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
         mean,
         centered,
         weighted,
+        Val(false),
+        nothing,
         Val(false),
     )
     return output
@@ -128,8 +125,40 @@ function JeffClient.native_residual_rms(
         Val(true),
         Val(true),
         Val(true),
+        nothing,
+        Val(false),
     )
     return residual, output
+end
+
+function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps)
+    size(x) == size(gate) || throw(DimensionMismatch("RMS gate shapes must match."))
+    length(weight) == size(x, 1) ||
+        throw(DimensionMismatch("RMS weight width must match the input."))
+    size(x, 1) > 4096 && return JeffClient.native_rms(x, weight, eps; centered = false) .*
+           JeffClient.native_silu.(gate)
+    width = size(x, 1)
+    columns = length(x) ÷ width
+    output = pooled_array(Float32, size(x))
+    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
+        output,
+        x,
+        nothing,
+        nothing,
+        weight,
+        Float32(eps),
+        1.0f0,
+        Int32(width),
+        Int32(columns),
+        Val(cld(width, 32)),
+        Val(true),
+        Val(false),
+        Val(true),
+        Val(false),
+        gate,
+        Val(true),
+    )
+    return output
 end
 
 function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered = true)

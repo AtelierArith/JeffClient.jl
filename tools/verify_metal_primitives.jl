@@ -127,6 +127,23 @@ function main()
         GC.gc(true)
     end
     println("Validated fused RMS/RoPE, grouped head layouts, gates, and cache keys.")
+    for width in (8, 128, 256, 1024)
+        host = reshape(sin.(Float32.(1:(width*6))), width, 2, 3)
+        host[:, 1, 1] .= 0.0f0
+        gate = reshape(12.0f0 .* cos.(Float32.(1:(width*6))), size(host))
+        weight = cos.(Float32.(1:width)) .* 0.1f0
+        expected =
+            JeffClient.native_rms(host, weight, 1.0f-6; centered = false) .*
+            JeffClient.native_silu.(gate)
+        gpu_host, gpu_gate, gpu_weight = Metal.MtlArray.((host, gate, weight))
+        for pass = 1:2
+            actual = Array(extension.rms_silu_gate(gpu_host, gpu_gate, gpu_weight, 1.0f-6))
+            isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+                error("RMS SiLU gate mismatch.")
+            GC.gc(true)
+        end
+    end
+    println("Validated fused RMS/SiLU gates at widths 8/128/256/1024 after GC.")
     for (width, heads, value_width) in ((7, 2, 3), (128, 2, 7), (256, 1, 9)),
         length in (1, 9, 65)
 

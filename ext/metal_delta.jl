@@ -161,8 +161,7 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         Val(key_values),
         Val(rows),
     )
-    normalized = JeffClient.native_rms(output, attention.norm, cfg.eps; centered = false)
-    gated = normalized .* JeffClient.native_silu.(z)
+    gated = rms_silu_gate(output, z, attention.norm, cfg.eps)
     return JeffClient.native_linear(
         attention.out,
         reshape(gated, cfg.value_dim * cfg.value_heads, length),

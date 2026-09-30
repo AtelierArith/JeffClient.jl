@@ -312,7 +312,10 @@ native_residual_rms(x, mixed, weight, eps) = begin
     residual, native_rms(residual, weight, eps)
 end
 
-native_mlp_gate(gate, up) = native_silu.(gate) .* up
+function native_mlp_gate!(gate, up)
+    gate .= native_silu.(gate) .* up
+    return gate
+end
 native_prepare_mask(reference, mask) = mask
 
 function native_layer(layer, x, mask, cfg)
@@ -324,8 +327,11 @@ function native_layer(layer, x, mask, cfg)
     residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
     gate = native_linear(layer.mlp.gate, normalized)
     up = native_linear(layer.mlp.up, normalized)
-    mlp = native_linear(layer.mlp.down, native_mlp_gate(gate, up))
-    return residual .+ mlp
+    mlp = native_linear(layer.mlp.down, native_mlp_gate!(gate, up))
+    # residual is owned by this layer; its normalization has already consumed
+    # the old values, so reuse it for the final sum on the same device queue.
+    residual .+= mlp
+    return residual
 end
 
 """

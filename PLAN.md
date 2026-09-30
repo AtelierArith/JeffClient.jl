@@ -148,9 +148,9 @@ extension methods at that stage.
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.201 s**, original Python MPS
-**0.350 s**. Julia heap: **17,012 allocations / 763,040 bytes**. This is ~12.4×
-faster than the 2.492 s implementation, with ~99.4% fewer allocations. Loading
+20 warmed synchronized calls: Julia Metal **0.203 s**, original Python MPS
+**0.350 s**. Julia heap: **14,179 allocations / 651,632 bytes**. This is ~12.3×
+faster than the 2.492 s implementation, with ~99.5% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
 GC between cases and disabled scalar indexing. The tiny fixture and primitive
@@ -166,7 +166,9 @@ Matched batch 2 / length 512 / F32 medians are Julia 806 ms and Python 1,339 ms.
 Private cache snapshots after trial/GC/trim are 4.06/5.06/4.77 GB; this is not
 peak GPU memory. Completed downloads now trim oversized free caches, while
 late GC returns may exceed the limit until the next trim.
-Next work: fuse DeltaNet output RMS and SiLU gating; reusable workspaces,
+DeltaNet RMS/SiLU gate fusion and in-place residual/MLP activation are verified.
+Fixed-length MPS pointer storage removes the conversion pointer Vector.
+Next work: reusable workspaces,
 intermediate lifetimes, MPS descriptors, and true batch execution. Reduce
 remaining allocations and measure changes against independent references.
 Detailed findings

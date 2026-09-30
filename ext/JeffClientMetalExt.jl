@@ -15,7 +15,7 @@ using Metal.MPSGraphs:
     matrixMultiplicationWithPrimaryTensor,
     default_exec_desc
 using Metal.ObjectiveC.Foundation:
-    @autoreleasepool, NSArray, NSDictionary, nil, retain, release
+    @autoreleasepool, NSArray, NSDictionary, NSUInteger, nil, retain, release
 
 include("metal_buffers.jl")
 
@@ -108,8 +108,25 @@ const PRODUCT_GRAPH_LOCK = ReentrantLock()
 graph_tensor_data(matrix::Metal.MtlArray{T}, shape::MPS.MPSShape) where {T} =
     MPSGraphTensorData(matrix.data[], shape, T)
 
-function tensor_dictionary(keys::NSArray, values::Vector{MPSGraphTensorData})
-    objects = NSArray(values)
+function tensor_dictionary(
+    keys::NSArray,
+    values::Vector{MPSGraphTensorData},
+    ::Val{N},
+) where {N}
+    length(values) == N ||
+        throw(DimensionMismatch("Tensor dictionary value count mismatch."))
+    identifiers = ntuple(i -> pointer(values[i]), Val(N))
+    storage = Ref(identifiers)
+    objects = GC.@preserve values storage begin
+        address = Ptr{id{MPSGraphTensorData}}(
+            Base.unsafe_convert(Ptr{typeof(identifiers)}, storage),
+        )
+        array = @objc [
+            NSArray arrayWithObjects:(address::Ptr{id{MPSGraphTensorData}})
+            count:(N::NSUInteger)
+        ]::id{NSArray}
+        NSArray(array)
+    end
     dictionary = @objc [
         NSDictionary dictionaryWithObjects:(objects::id{NSArray})
         forKeys:(keys::id{NSArray})
@@ -132,8 +149,8 @@ end
         graph_tensor_data(b, cached.shape_b),
     ]
     result_values = MPSGraphTensorData[graph_tensor_data(c, cached.shape_c)]
-    feeds = tensor_dictionary(cached.feed_keys, feed_values)
-    results = tensor_dictionary(cached.result_keys, result_values)
+    feeds = tensor_dictionary(cached.feed_keys, feed_values, Val(2))
+    results = tensor_dictionary(cached.result_keys, result_values, Val(1))
     queue = Metal.global_queue(Metal.device())
     Metal.end_encoder!(queue)
     command = MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))
