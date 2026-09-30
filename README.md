@@ -364,6 +364,9 @@ To release the current task's workspace references after using it:
 Base.get_extension(JeffClient, :JeffClientMetalExt).clear_forward_workspace!()
 ```
 
+This waits for GPU completion and drops cached references. Buffer return still
+uses normal ownership and GC; it does not immediately free all resident memory.
+
 An additional experiment, `JEFF_METAL_PACKED_MLP=1`, packs gate/up weights when
 loading a Metal backend. It reduces each MLP to two matrix products and a gate
 kernel; the backend retains packed weights instead of the original pair.
@@ -379,8 +382,33 @@ strategies using an unpacked backend, so run it with `JEFF_METAL_PACKED_MLP=0`.
 Without workspace, packed MLP measured 8,191 allocations / 342,080 bytes /
 194.1 ms, versus the default 8,446 / 364,512 / 195.2 ms; latency ranges overlap.
 
-This waits for GPU completion and drops cached references. Buffer return still
-uses normal ownership and GC; it does not immediately free all resident memory.
+Two further options, both disabled by default, reduce work on left-padded inputs:
+
+- `JEFF_METAL_TRIM_PADDING=1` skips only the leading zero-mask prefix; interior
+  mask holes remain. B1/L256 with 101 active tokens and workspace enabled measured
+  86.1 ms / 4,111 allocations / 217,584 host bytes over 20 samples, versus
+  193.4 ms without trimming. The computed sequence length becomes 101.
+- `JEFF_METAL_SHAPE_WORKSPACES=1`, together with `JEFF_METAL_WORKSPACE=1`,
+  retains up to two workspaces by computed sequence length. With trimming,
+  B2/L512 with active lengths 512/256 measured 574.8 ms median / 577.4 ms p95 /
+  579.7 ms maximum over 20 samples, and 8,334 allocations / 749,024 host bytes.
+  The two workspaces retain 2,623,995,904 device-buffer bytes. A single workspace
+  repeatedly replacing shapes measured 17,114 allocations and a 9.2-second
+  maximum. Longer measurements are needed to establish tail behavior.
+
+RoPE tables now retain two recent configurations per queue. After this change,
+the same B2 case over 50 samples measured 8,274 allocations / 448,608 host bytes,
+581 ms median / 590 ms p95 / 591 ms maximum. This reduces table construction
+allocations; the measurements do not establish an additional latency improvement.
+
+Shape workspaces use LRU eviction and, after completion, evict older entries if
+their combined buffer bytes exceed one quarter of the recommended working set.
+A single current workspace can exceed that limit. Weights, free pools, and peak
+memory are excluded. The clear function above releases all shape workspaces.
+Independent PyTorch references pass for 15 cases, including interior mask holes;
+shape-workspace ownership checks pass. Its six inspected JET targets report no
+errors, and allocation profiling records no new MPS tensor-data wrappers.
+
 The latest type check reports no JET errors for the six inspected JeffClient
 and Metal-extension targets; normalization's Bool dispatch is explicitly split.
 
@@ -390,6 +418,8 @@ julia --project=tools tools/inspect_native.jl CHECKPOINT_DIRECTORY artifacts/jef
 JEFF_INSPECT_PROFILE=0 julia --project=tools tools/inspect_native.jl CHECKPOINT_DIRECTORY artifacts/jeff-0.8b-onnx/reference.json
 # Increase allocation sampling when the optimized forward allocates less:
 JEFF_ALLOC_SAMPLE_RATE=0.1 julia --project=tools tools/inspect_native.jl CHECKPOINT_DIRECTORY artifacts/jeff-0.8b-onnx/reference.json
+# Inspect a selected case in an expanded reference document:
+julia --project=tools tools/inspect_native.jl CHECKPOINT_DIRECTORY artifacts/metal-validation/reference-with-mask-holes.json 12
 ```
 
 AllocCheck could not be combined with this Metal environment: its registered

@@ -617,6 +617,19 @@ function main()
         repeated = extension.rope_tables(gpu_q, cfg, length)
         tables[1] === repeated[1] && tables[2] === repeated[2] ||
             error("RoPE cache did not reuse its tables.")
+        alternate = extension.rope_tables(gpu_q, cfg, length + 1)
+        Metal.synchronize()
+        GC.gc(true)
+        restored = extension.rope_tables(gpu_q, cfg, length)
+        tables[1] === restored[1] && tables[2] === restored[2] ||
+            error("RoPE cache replaced tables after a length switch and GC.")
+        alternate[1] !== restored[1] || error("RoPE cache reused the wrong length.")
+        extension.rope_tables(gpu_q, cfg, length + 2)
+        queue = objectid(Metal.global_queue(Metal.device()))
+        entries = extension.ROPE_TABLE_CACHE[queue]
+        Base.length(entries) == 2 || error("RoPE cache exceeded its entry limit.")
+        any(table -> table.key == (rotary_dim, length + 1, theta), entries) &&
+            error("RoPE cache did not evict the least recently used length.")
         actual_q = Array(extension.prepare_query(gpu_q, gpu_w, tables, cfg, length))
         gpu_key, gpu_value =
             extension.prepare_key_value(gpu_k, gpu_v, gpu_w, tables, cfg, length)

@@ -6,30 +6,45 @@ struct RopeTables
     sines::Metal.MtlArray{Float32,2,Metal.SharedStorage}
 end
 
-# Keep only the current table pair per queue. Replaced tables remain rooted by
+# Keep two recent table pairs per queue for alternating computed lengths.
+# Replaced tables remain rooted by
 # queued kernels; shared storage is not rewritten until GPU work completes.
-const ROPE_TABLE_CACHE = Dict{UInt,RopeTables}()
+const ROPE_TABLE_CACHE = Dict{UInt,Vector{RopeTables}}()
 const ROPE_TABLE_LOCK = ReentrantLock()
 
-function rope_tables(reference, cfg, length)
+function rope_tables(reference, cfg, sequence_length)
     queue = objectid(Metal.global_queue(Metal.device()))
-    key = (cfg.rotary_dim, length, cfg.rope_theta)
+    key = (cfg.rotary_dim, sequence_length, cfg.rope_theta)
     @lock ROPE_TABLE_LOCK begin
-        cached = get(ROPE_TABLE_CACHE, queue, nothing)
-        if cached === nothing || cached.key != key
+        tables = get!(Vector{RopeTables}, ROPE_TABLE_CACHE, queue)
+        index = findfirst(table -> table.key == key, tables)
+        if index === nothing
             half = cfg.rotary_dim ÷ 2
             # Preserve the CPU implementation's Float32 frequency arithmetic.
             frequency = inv.(
                 cfg.rope_theta .^
                 (Float32.(0:2:(cfg.rotary_dim-1)) ./ Float32(cfg.rotary_dim)),
             )
-            theta = frequency .* permutedims(Float32.(0:(length-1)))
+            theta = frequency .* permutedims(Float32.(0:(sequence_length-1)))
             cached = RopeTables(
                 key,
-                JeffClient.on_native_device(reference, reshape(cos.(theta), half, length)),
-                JeffClient.on_native_device(reference, reshape(sin.(theta), half, length)),
+                JeffClient.on_native_device(
+                    reference,
+                    reshape(cos.(theta), half, sequence_length),
+                ),
+                JeffClient.on_native_device(
+                    reference,
+                    reshape(sin.(theta), half, sequence_length),
+                ),
             )
-            ROPE_TABLE_CACHE[queue] = cached
+            push!(tables, cached)
+            length(tables) > 2 && popfirst!(tables)
+        else
+            cached = tables[index]
+            if index != length(tables)
+                deleteat!(tables, index)
+                push!(tables, cached)
+            end
         end
         return cached.cosines, cached.sines
     end

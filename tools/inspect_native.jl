@@ -30,16 +30,28 @@ function report_target(name, f, args...)
 end
 
 function main()
-    length(ARGS) == 2 || error(
-        "Usage: julia --project=tools tools/inspect_native.jl CHECKPOINT REFERENCE_JSON",
+    2 <= length(ARGS) <= 3 || error(
+        "Usage: julia --project=tools tools/inspect_native.jl CHECKPOINT REFERENCE_JSON [CASE_INDEX]",
     )
     BLAS.set_num_threads(8)
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     backend = NativeBackend(ARGS[1]; device = :metal)
-    sample = first(JSON.parsefile(ARGS[2]))
+    references = JSON.parsefile(ARGS[2])
+    cases = references isa AbstractDict ? references["cases"] : references
+    index = length(ARGS) == 3 ? parse(Int, ARGS[3]) : 1
+    sample = cases[index]
     rows_to_matrix(rows, T) = reduce(vcat, [permutedims(T.(row)) for row in rows])
     inputs = Dict(name => rows_to_matrix(rows, Int64) for (name, rows) in sample["inputs"])
+    println("Reference case: ", index, "; input shape: ", size(inputs["input_ids"]))
+    for flag in (
+        "JEFF_METAL_WORKSPACE",
+        "JEFF_METAL_PACKED_MLP",
+        "JEFF_METAL_TRIM_PADDING",
+        "JEFF_METAL_SHAPE_WORKSPACES",
+    )
+        println(flag, "=", get(ENV, flag, "0"))
+    end
     println(
         "Julia ",
         VERSION,
@@ -159,6 +171,13 @@ function main()
         println(label, " sorted by sampled allocation count:")
         for (key, value) in first(
             sort!(collect(groups); by = x -> last(x)[1], rev = true),
+            min(15, length(groups)),
+        )
+            println(value, " ", key)
+        end
+        println(label, " sorted by sampled allocation bytes:")
+        for (key, value) in first(
+            sort!(collect(groups); by = x -> last(x)[2], rev = true),
             min(15, length(groups)),
         )
             println(value, " ", key)
