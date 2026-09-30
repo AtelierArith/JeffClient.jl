@@ -287,21 +287,42 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
     output = pooled_array(Float32, (cfg.value_dim, cfg.value_heads, length))
     key_values = cld(cfg.key_dim, 32)
     rows = 8
-    Metal.@metal threads=(32, rows) groups=(cld(cfg.value_dim, rows), cfg.value_heads) delta_recurrent_kernel!(
-        output,
-        query,
-        key,
-        mixed,
-        beta,
-        decay,
-        Int32(cfg.key_dim),
-        Int32(cfg.value_dim),
-        Int32(2key_width),
-        Int32(cfg.value_heads ÷ cfg.key_heads),
-        Int32(length),
-        Val(key_values),
-        Val(rows),
-    )
+    if cfg.key_dim == 128
+        launch_cached_kernel!(
+            delta_recurrent_kernel!,
+            output,
+            query,
+            key,
+            mixed,
+            beta,
+            decay,
+            Int32(cfg.key_dim),
+            Int32(cfg.value_dim),
+            Int32(2key_width),
+            Int32(cfg.value_heads ÷ cfg.key_heads),
+            Int32(length),
+            Val(4),
+            Val(8);
+            threads = (32, rows),
+            groups = (cld(cfg.value_dim, rows), cfg.value_heads),
+        )
+    else
+        Metal.@metal threads=(32, rows) groups=(cld(cfg.value_dim, rows), cfg.value_heads) delta_recurrent_kernel!(
+            output,
+            query,
+            key,
+            mixed,
+            beta,
+            decay,
+            Int32(cfg.key_dim),
+            Int32(cfg.value_dim),
+            Int32(2key_width),
+            Int32(cfg.value_heads ÷ cfg.key_heads),
+            Int32(length),
+            Val(key_values),
+            Val(rows),
+        )
+    end
     gated = rms_silu_gate(output, z, attention.norm, cfg.eps)
     return JeffClient.native_linear(
         attention.out,

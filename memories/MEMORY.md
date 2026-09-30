@@ -461,3 +461,10 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-qk-handles-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-qk-handles.json` へ保存する。型検査・全割当Profileは未実施。
 - B1/L256/active101/F32/workspace有効・20回は **4,695 allocations / 249,360 bytes / 中央値193.334437 ms**、min/p95/max192.480833/193.81275/193.899708 ms。直前4,983 / 261,744から288件 / 12,384 bytes減。control再測定193.3279165 msと同程度で、追加の速度改善はない。pipeline管理だけを減らしたと断定せず、Val型確定の効果も全割当Profile（`/private/tmp/jeff-qk-handles-profile.log`）で確認する。
 - 上記Profileは完了し、JET6対象報告なし、全割当4,695件。Int32は186→114、Float32は96→60、Tuple{Int64,Int64}は657→621。KernelState206・MPS wrapper13・TD187は不変。18起動のpipeline管理だけで説明できる36件より大きい288件減であり、主要幅をhost分岐で確定したことによる引数管理の削減も含む。
+
+## Recurrent 起動の主要幅での kernel handle cache 候補
+
+- 最新全割当Profileで487件を記録したrecurrent起動にも、key_dim128に限りVal(4)/Val(8)を確定して既存cached launchを適用する候補を追加した。rows8、GPU演算、scalar引数、配置、所有は維持し、他のkey幅は従来macroを使う。単体検証は `/private/tmp/jeff-recurrent-handles-primitives.log`。性能・実モデル・型検査は未完了。
+- 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-recurrent-handles-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-recurrent-handles.json` へ保存する。型検査・全割当Profileは未実施。
+- B1/L256/active101/F32/workspace有効・20回は **4,479 allocations / 237,264 bytes / 中央値193.2585835 ms**、min/p95/max192.815375/193.747042/194.055833 ms。直前4,695 / 249,360から216件 / 12,096 bytes減。中央値193.334437 msと同程度で、追加の速度改善はない。型検査・全割当Profileは `/private/tmp/jeff-recurrent-handles-profile.log` で実行する。
+- 上記Profileは完了し、JET6対象すべて報告なし、全割当4,479件。KernelState206・MPS wrapper13・TD187は変わらない。主要幅のhost型分岐とhandle再利用で割当を減らし、GPU起動や演算を省いた結果ではない。
