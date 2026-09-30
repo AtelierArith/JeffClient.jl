@@ -28,6 +28,27 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    Metal.synchronize()
+    extension.clear_mps_command_cache!()
+    queue = Metal.global_queue(Metal.device())
+    owner = Metal.ensure_cmdbuf!(queue)
+    command = extension.batched_mps_command_buffer(queue)
+    extension.batched_mps_command_buffer(queue) === command ||
+        error("MPS command wrapper was not reused.")
+    pointer(command.commandBuffer) == pointer(owner) || error("MPS command owner mismatch.")
+    GC.gc(true)
+    extension.batched_mps_command_buffer(queue) === command ||
+        error("MPS command wrapper lost after GC.")
+    Metal.flush!(queue)
+    next_command = extension.batched_mps_command_buffer(queue)
+    next_command !== command || error("MPS command wrapper reused after submission.")
+    pointer(next_command.commandBuffer) != pointer(owner) ||
+        error("Submitted command buffer reused.")
+    JeffClient.native_host(Metal.MtlArray(Float32[1]))
+    cache = task_local_storage()[extension.MPS_COMMAND_CACHE_KEY]
+    cache.owner === nothing && cache.command === nothing ||
+        error("Completed MPS command retained.")
+    println("Validated MPS command wrapper identity, submission boundaries, GC, and clear.")
     for width in (7, 128, 1024), sequence_length in (1, 9, 65)
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mixed = cos.(host)
@@ -184,6 +205,9 @@ function main()
             true
         end
         failed && !workspace.active || error("Workspace exception cleanup failed.")
+        cache = task_local_storage()[extension.MPS_COMMAND_CACHE_KEY]
+        cache.owner === nothing && cache.command === nothing ||
+            error("Failed forward retains MPS command.")
         extension.clear_forward_workspace!()
         isempty(workspace.slots) && isempty(workspace.tensor_data) ||
             error("Workspace retains slots after clear.")

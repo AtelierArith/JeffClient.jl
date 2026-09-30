@@ -245,6 +245,39 @@ end
 # Following Laya, encode the cached MPSGraph into Metal's current batch instead
 # of committing a separate command buffer (and flushing kernels) per product.
 # All arrays and Objective-C feed objects stay rooted until GPU completion.
+mutable struct MPSCommandCache
+    owner::Union{Nothing,Metal.MTL.MTLCommandBuffer}
+    command::Union{Nothing,MPS.MPSCommandBuffer}
+end
+
+const MPS_COMMAND_CACHE_KEY = :JeffClientMetalMPSCommandCache
+empty_mps_command_cache() = MPSCommandCache(nothing, nothing)
+
+function batched_mps_command_buffer(queue)
+    owner = Metal.ensure_cmdbuf!(queue)
+    cache = get!(
+        empty_mps_command_cache,
+        task_local_storage(),
+        MPS_COMMAND_CACHE_KEY,
+    )::MPSCommandCache
+    if cache.owner === owner
+        return cache.command::MPS.MPSCommandBuffer
+    end
+    command = MPS.MPSCommandBuffer(owner)
+    cache.owner = owner
+    cache.command = command
+    return command
+end
+
+function clear_mps_command_cache!()
+    cache = get(task_local_storage(), MPS_COMMAND_CACHE_KEY, nothing)
+    if cache isa MPSCommandCache
+        cache.owner = nothing
+        cache.command = nothing
+    end
+    return nothing
+end
+
 @autoreleasepool function batched_matmul!(
     c,
     a,
@@ -270,7 +303,7 @@ end
     results = tensor_dictionary(cached.result_key_ids, result_values, Val(1))
     queue = Metal.global_queue(Metal.device())
     Metal.end_encoder!(queue)
-    command = MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))
+    command = batched_mps_command_buffer(queue)
     MPS.encode!(command, cached.graph, feeds, results, nil, default_exec_desc())
     # encode! consumes the autoreleased dictionaries inside this pool. Their
     # managed tensor-data values remain rooted for the queued GPU operations,

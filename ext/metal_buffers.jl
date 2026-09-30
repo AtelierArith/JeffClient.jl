@@ -169,6 +169,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         Metal.synchronize()
         rethrow()
     finally
+        clear_mps_command_cache!()
         workspace.active = false
         for slot = (workspace.cursor+1):length(workspace.slots)
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
@@ -314,6 +315,7 @@ end
 
 function JeffClient.native_host(input::Metal.MtlArray)
     host = Array(input) # This waits for the current queue's GPU work.
+    clear_mps_command_cache!()
     recycle_uploads!()
     trim_completed_buffer_pool!()
     return host

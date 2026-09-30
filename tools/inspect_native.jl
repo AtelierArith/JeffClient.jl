@@ -164,6 +164,12 @@ function main()
             println(value, " ", key)
         end
     end
+    println("Focused Metal management types (count, bytes):")
+    for type in
+        (Metal.MPS.MPSCommandBuffer, Metal.MPSGraphs.MPSGraphTensorData, Metal.KernelState)
+        key = string(type)
+        println(get(by_type, key, (0, 0)), " ", key)
+    end
 end
 
 main()

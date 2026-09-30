@@ -196,15 +196,15 @@ The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 2.08 s and its first forward took 10.30 s
+Julia Metal's model loading took 2.06 s and its first forward took 10.24 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 10,513 Julia heap allocations / 457,232 bytes per
+BenchmarkTools measured 10,327 Julia heap allocations / 451,280 bytes per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
 fell from 2.492 s to 0.195 s (~12.8× faster). Allocation counts fell from 2,845,912
-to 10,513 (~99.6%), and Julia heap bytes from 145,768,352 to 457,232 (~99.7%). Device-only buffers
+to 10,327 (~99.6%), and Julia heap bytes from 145,768,352 to 451,280 (~99.7%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -245,6 +245,9 @@ were 194.9/192.7/202.7/249.4 ms; a further latency improvement is not establishe
 Layer-boundary residual/RMS fusion and readout-column views reduced the current
 default path to 10,513 allocations / 457,232 bytes, with median/minimum/p95/
 maximum 195.0/192.4/201.0/213.1 ms.
+Reusing the MPS wrapper within each open Metal command buffer reduced the
+default path to 10,327 allocations / 451,280 bytes. Median/minimum/p95/maximum
+were 194.7/192.6/201.9/206.2 ms; latency remained similar.
 
 The latest free private cache snapshots were 1.73/6.13/4.77 GB after
 trial/full GC/explicit trim. The cache limit is one quarter of recommended
@@ -310,7 +313,7 @@ An experimental task-local workspace is available with
 allocation position and reuses their MPS tensor-data and feed/result value Vectors
 after CPU score readback completes the GPU work. With the dedicated embedding
 gather, paired Q/K normalization, fused delta gates, and dedicated mask/MLP/residual kernels, the prepared
-batch-1/length-256 Float32 case measured 6,366 host allocations / 319,616 bytes
+batch-1/length-256 Float32 case measured 6,180 host allocations / 313,664 bytes
 and a 193 ms median over
 20 warmed runs. The preceding MLP optimization's 193 ms latency was also
 reproduced in a separate process; residual addition reduced allocation further
@@ -320,6 +323,8 @@ and a 193 ms median.
 The current path also fuses each layer's final residual sum into the following
 input RMS and uses views for the last readout column; this removed another
 471 allocations / 4,576 bytes without an established latency improvement.
+Reusing the MPS command wrapper removed another 186 allocations / 5,952 bytes,
+again with a 193 ms median.
 It retains 447 arrays / 857,899,008
 device-buffer bytes, 199 tensor-data objects, and 199 reusable feed Vectors;
 these bytes are separate from
