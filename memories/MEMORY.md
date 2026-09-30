@@ -454,3 +454,10 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 
 - workspace無効、B1/L256/active101/F32・20回は **9,130 allocations / 399,360 bytes / 中央値194.887542 ms**、min/p95/max192.139209/202.468625/233.617334 ms。直前通常設定10,129 / 446,384から999件 / 47,024 bytes減。load後初回forward12.142814792秒はsteady-stateに含めない。free poolはtrial/GC/trimで1,732,575,232 / 6,133,907,456 / 4,765,515,776 bytesと変わらない。結果は `artifacts/metal-validation/benchmark-metal-default-attention-handles.json`。速度は従来と同程度。README/PLANの通常・workspace B1の値を更新し、古い10% allocation sampleの割合を現在のfull profileの実数に置き換えた。
 - workspace有効、B2/L512/active512・256/F32・20回は **10,190 allocations / 538,400 bytes / 中央値765.487021 ms**、min/p95/max757.707667/773.58825/774.093208 ms、最大logit誤差 `1.9311905e-5`。直前12,284 / 633,984から2,094件 / 95,584 bytes減。workspace447配列 / 1,766,096,896 device-buffer bytesは同じ。前の762.7117295 msとの分布は重なり、追加速度改善はない。結果は `artifacts/metal-validation/benchmark-metal-attention-handles-b2-l512.json`。同じcaseのoriginal Python MPS F32参照1,300.984021 msより約41.2%短いが、FLA/causal-conv1d未導入fallback、Juliaの行逐次処理という比較条件を維持する。README/PLANのB2値も更新した。
+
+## Packed Q/K の主要幅での kernel handle cache 候補
+
+- 全割当Profileで582件を記録したpaired Q/K起動について、実モデルのkey_dim128に限ってVal(4)を明示し既存cached launchへ進む候補を追加した。他の幅は従来macroで正確なcld値を使う。RMSで確認した実行時Valによるruntime dispatchを避け、GPU算術・配置・所有は変更しない。単体検証ログは `/private/tmp/jeff-qk-handles-primitives.log`。性能・実モデル・型検査は未完了。
+- 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-qk-handles-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-qk-handles.json` へ保存する。型検査・全割当Profileは未実施。
+- B1/L256/active101/F32/workspace有効・20回は **4,695 allocations / 249,360 bytes / 中央値193.334437 ms**、min/p95/max192.480833/193.81275/193.899708 ms。直前4,983 / 261,744から288件 / 12,384 bytes減。control再測定193.3279165 msと同程度で、追加の速度改善はない。pipeline管理だけを減らしたと断定せず、Val型確定の効果も全割当Profile（`/private/tmp/jeff-qk-handles-profile.log`）で確認する。
+- 上記Profileは完了し、JET6対象報告なし、全割当4,695件。Int32は186→114、Float32は96→60、Tuple{Int64,Int64}は657→621。KernelState206・MPS wrapper13・TD187は不変。18起動のpipeline管理だけで説明できる36件より大きい288件減であり、主要幅をhost分岐で確定したことによる引数管理の削減も含む。

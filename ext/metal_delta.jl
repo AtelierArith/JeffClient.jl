@@ -154,6 +154,23 @@ function packed_qk_pair(mixed, cfg, length)
     query = pooled_array(Float32, (cfg.key_dim, cfg.key_heads, length))
     key = pooled_array(Float32, (cfg.key_dim, cfg.key_heads, length))
     columns = cfg.key_heads * length
+    if cfg.key_dim == 128
+        launch_cached_kernel!(
+            packed_qk_pair_kernel!,
+            query,
+            key,
+            mixed,
+            Int32(cfg.key_dim),
+            Int32(cfg.key_heads),
+            Int32(size(mixed, 1)),
+            Int32(columns),
+            sqrt(Float32(cfg.key_dim)),
+            Val(4);
+            threads = (32, 8),
+            groups = (cld(columns, 8), 1),
+        )
+        return query, key
+    end
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) packed_qk_pair_kernel!(
         query,
         key,
