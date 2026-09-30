@@ -1,6 +1,6 @@
 # Inference and accelerators
 
-## Setup and tiny ONNX demo
+## Setup
 
 Install Julia 1.13 and Git, then run:
 
@@ -8,14 +8,11 @@ Install Julia 1.13 and Git, then run:
 git clone https://github.com/AtelierArith/JeffClient.jl.git
 cd JeffClient.jl
 julia --project -e 'using Pkg; Pkg.instantiate()'
-julia --project examples/prepared_inference.jl
+julia --project examples/native_inference.jl
 ```
 
-The `test/fixtures/logits.onnx` file is tracked by Git and included in the
-clone. The example does not generate it. This tiny Identity graph processes
-supplied scores; it contains no Jeff weights and prints `Choice: yes` with
-probability `0.75`. No Python or checkpoint download is required. Internet
-access is needed for the initial Julia dependency installation.
+Internet access is needed for the initial Julia dependency installation and
+checkpoint download. The native demo requires no Python setup or ONNX export.
 
 For Metal examples, on a Mac with an Apple GPU, first install the tools
 environment from the repository root:
@@ -65,7 +62,20 @@ scalar GPU indexing, constructs `NativeBackend(checkpoint; device=:metal)`, and
 returns the decision to CPU. It uses the same real weights and prepared prompt
 as the CPU example. It requires an Apple GPU; no Python or ONNX export is used.
 
-## Prepared-tensor inference
+## Supplement: ONNX Runtime
+
+To try the ONNX interface without downloading Jeff's weights, run:
+
+```bash
+julia --project examples/prepared_inference.jl
+```
+
+The `test/fixtures/logits.onnx` file is tracked by Git and included in the
+clone. The example does not generate it. This tiny Identity graph processes
+supplied scores; it contains no Jeff weights and prints `Choice: yes` with
+probability `0.75`. No Python or checkpoint download is required.
+
+### Prepared-tensor inference
 
 Your graph must output raw option logits of shape `(batch, options)`. Pass
 arrays in ONNX logical dimension order; do not reverse dimensions manually.
@@ -98,7 +108,7 @@ rows. Yes/no questions use false then true columns. Score questions return an
 expected value on a zero-based scale. Choice confidence follows Jeff's formula
 and is not the same as the winning probability.
 
-## CUDA
+### CUDA through ONNX Runtime
 
 Install `CUDA` and `cuDNN` in your application environment, import both before
 constructing `ONNXBackend(...; execution_provider=:cuda)`. Compatibility depends

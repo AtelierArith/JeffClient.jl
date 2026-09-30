@@ -1,7 +1,7 @@
 # JeffClient.jl
 
 Native Julia inference for [Jeff](https://github.com/firelex/jeff), running
-Qwen3.5 on CPU and Apple GPU through Metal.jl. ONNX Runtime is also supported.
+Qwen3.5 on CPU and Apple GPU through Metal.jl.
 Inference accepts prepared token tensors; text tokenization is not implemented.
 Python is needed only for export and reference tools, through PythonCall.jl.
 
@@ -61,20 +61,12 @@ This executes the same real-checkpoint demo on an Apple GPU and prints
 demo's model cache. Python and ONNX export are not required. The first run
 also compiles GPU kernels, so startup takes longer than subsequent inference.
 
-### Optional: tiny ONNX demo
-
-To try ONNX Runtime without downloading Jeff's weights, run
-`julia --project examples/prepared_inference.jl` after the setup above.
-It uses the Git-bundled `test/fixtures/logits.onnx` Identity graph, processes
-supplied scores, and prints `Choice: yes` with probability `0.75`.
-The example does not generate this file. See [fixture details](test/fixtures/README.md).
-
 ## Documentation
 
 Detailed documentation is maintained with Documenter.jl in [`docs/`](docs):
 
 - [Overview](docs/src/index.md)
-- [Model downloads, caching and ONNX export](docs/src/models.md)
+- [Model downloads and caching](docs/src/models.md)
 - [Inference, CUDA and Metal](docs/src/inference.md)
 - [Performance comparisons with Python](docs/src/performance.md)
 - [Profiling, allocation findings and Metal tuning](docs/src/profiling.md)
