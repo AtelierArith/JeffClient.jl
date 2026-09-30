@@ -184,7 +184,8 @@ function graph_tensor_data(matrix::Metal.MtlArray{T}, shape::MPS.MPSShape) where
         cached !== nothing && return cached[1]
         # Only cache owned slots, whose buffer and physical dimensions are fixed.
         # Temporary reshape wrappers and standalone arrays keep the usual path.
-        if workspace.cursor > 0 && workspace.slots[workspace.cursor] === matrix
+        slot = get(workspace.slot_indices, key, 0)
+        if 0 < slot <= workspace.cursor && workspace.slots[slot] === matrix
             data = MPSGraphTensorData(matrix.data[], shape, T)
             workspace.tensor_data[key] = MPSGraphTensorData[data]
             return data

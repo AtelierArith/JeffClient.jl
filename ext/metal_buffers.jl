@@ -100,6 +100,7 @@ end
 mutable struct ForwardWorkspace
     queue::UInt
     slots::Vector{Any}
+    slot_indices::Dict{UInt,Int}
     tensor_data::Dict{UInt,Vector{MPSGraphTensorData}}
     feed_values::Dict{UInt,Vector{MPSGraphTensorData}}
     cursor::Int
@@ -116,6 +117,7 @@ function clear_forward_workspace!()
     empty!(workspace.tensor_data)
     empty!(workspace.feed_values)
     empty!(workspace.slots)
+    empty!(workspace.slot_indices)
     delete!(task_local_storage(), FORWARD_WORKSPACE_KEY)
     return nothing
 end
@@ -133,12 +135,14 @@ function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
         end
         array = fresh_pooled_array(T, dims)
         if slot <= length(workspace.slots)
+            delete!(workspace.slot_indices, objectid(workspace.slots[slot]))
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
             pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
             workspace.slots[slot] = array
         else
             push!(workspace.slots, array)
         end
+        workspace.slot_indices[objectid(array)] = slot
         return array
     end
     return fresh_pooled_array(T, dims)
@@ -153,6 +157,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         workspace = ForwardWorkspace(
             queue,
             Any[],
+            Dict{UInt,Int}(),
             Dict{UInt,Vector{MPSGraphTensorData}}(),
             Dict{UInt,Vector{MPSGraphTensorData}}(),
             0,
@@ -172,6 +177,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         clear_mps_command_cache!()
         workspace.active = false
         for slot = (workspace.cursor+1):length(workspace.slots)
+            delete!(workspace.slot_indices, objectid(workspace.slots[slot]))
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
             pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
         end

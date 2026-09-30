@@ -234,6 +234,8 @@ function main()
                 error("Completed feed retains input bindings.")
             length(workspace.feed_values) == 1 || error("Stale workspace feed values.")
             length(workspace.tensor_data) == 1 || error("Stale workspace tensor-data.")
+            workspace.slot_indices == Dict(objectid(array) => 1) ||
+                error("Stale workspace slot index.")
             if previous_array !== nothing && size(previous_array) == size(array)
                 array === previous_array || error("Workspace array was not reused.")
                 values === previous_values || error("Result value Vector was not reused.")
@@ -244,6 +246,39 @@ function main()
             GC.gc(true)
         end
         workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+        previous_input_data = nothing
+        previous_owned_input = nothing
+        for sequence_length in (9, 9, 1, 1, 65, 65)
+            actual = JeffClient.native_forward_scope(weight) do
+                owned_input = extension.pooled_array(Float32, (7, sequence_length))
+                fill!(owned_input, 1.0f0)
+                result = JeffClient.native_linear(weight, owned_input)
+                current_workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+                data = current_workspace.tensor_data[objectid(owned_input)][1]
+                if previous_owned_input !== nothing &&
+                   size(previous_owned_input) == size(owned_input)
+                    owned_input === previous_owned_input ||
+                        error("Past slot array was not reused.")
+                    data === previous_input_data ||
+                        error("Past slot tensor-data was not reused.")
+                end
+                previous_owned_input, previous_input_data = owned_input, data
+                JeffClient.native_host(result)
+            end
+            isapprox(
+                actual,
+                transpose(host_weight) * ones(Float32, 7, sequence_length);
+                atol = 2.0f-5,
+                rtol = 2.0f-5,
+            ) || error("Past slot linear mismatch.")
+            length(workspace.tensor_data) == 2 || error("Stale past slot tensor-data.")
+            length(workspace.slot_indices) == 2 || error("Stale past slot index.")
+            for (identifier, slot) in workspace.slot_indices
+                objectid(workspace.slots[slot]) == identifier ||
+                    error("Invalid workspace slot identity.")
+            end
+            GC.gc(true)
+        end
         failed = try
             JeffClient.native_forward_scope(weight) do
                 JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 3)))
@@ -255,6 +290,8 @@ function main()
             true
         end
         failed && !workspace.active || error("Workspace exception cleanup failed.")
+        length(workspace.slot_indices) == 1 ||
+            error("Failed forward retains stale slot index.")
         cache = task_local_storage()[extension.MPS_COMMAND_CACHE_KEY]
         cache.owner === nothing && cache.command === nothing ||
             error("Failed forward retains MPS command.")
@@ -262,6 +299,8 @@ function main()
         isempty(workspace.slots) && isempty(workspace.tensor_data) ||
             error("Workspace retains slots after clear.")
         isempty(workspace.feed_values) || error("Workspace retains feeds after clear.")
+        isempty(workspace.slot_indices) ||
+            error("Workspace retains slot indices after clear.")
         !haskey(task_local_storage(), extension.FORWARD_WORKSPACE_KEY) ||
             error("Workspace remains task-local after clear.")
     finally
