@@ -61,6 +61,12 @@
 2026-10-01、Julia 1.13.1、Cthulhu 3.0.2、TypedSyntax 1.5.4、Metal 1.11.1。
 診断用の `tools` 環境へ追加し、`tools/inspect_typed_source.jl` を作った。
 
+### 「Cthulhu で解決した」の範囲
+
+Cthulhu で確認できたのは、MPS の shape 変換が型安定でも毎回オブジェクトを生成すること。Profile.Allocs で対象を絞り、Cthulhu で呼び出し先と型推論結果を調べ、shape のキャッシュを実装して、その割当を削減した。型不安定性の修正ではなく、具体型のオブジェクト生成を繰り返す処理の修正だった。
+
+shape キャッシュによる割当数の削減は **33,202 → 28,426 回**。その後の feed/result 辞書の修正で **24,048 回**まで減ったが、こちらは別の変更である。heap allocation 全体はまだ解消しておらず、最新の辞書修正では推論時間の改善も確認できていない。Cthulhu は原因調査に役立った診断ツールであり、改善の効果は変更ごとの実測で判断する。
+
 - Cthulhu は型推論結果を見ながら呼び出し先へ降りるために使った。TypedSyntax は結果を元のソースに対応づける表示に使った。これらがコードを自動修正したわけではなく、見つけた割当元をもとに実装を変更した。
 - RoPE 融合後の JET 6 対象は既に報告なしで、Profile.Allocs の MPS feed/result・tensor-data 関連 3 箇所は約 34% を占めていた。この実測を出発点に、Cthulhu の対話的 descent で `MPSGraphTensorData(::MtlArray)` → `convert(MPSShape, reverse(size(matrix)))` へ降りた。
 - Metal の shape 変換は `NSArray(NSNumber.(collect(tuple)))`。戻り値は具体的な `NSArray` に推論されていたが、呼び出しごとに `Vector{Int}`、`Vector{NSNumber}`、Objective-C の array を作っていた。型が確定していても、こうした明示的なオブジェクト生成の割当は残る。
@@ -97,3 +103,38 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 同じ M4・Float32・batch 1・長さ 256・101 active tokens、20 回の計測で **24,048 回 / 1,172,384 bytes**。直前の 28,426 回 / 1,449,392 bytes に対して、割当数は約 **15.4%**、heap bytes は約 **19.1%** 減った。中央値は **218.8108335 ms**（直前 218.520229 ms）で、速度改善は確認できなかった。
 - private free pool は同じ約 1.57 GB。今回の変更はホスト管理オブジェクトの削減であり、GPU の保持量は減っていない。tensor-data、値の vector、Objective-C 辞書・カーネル起動の管理オブジェクトは依然として生成する。
 - 修正後の JET 6 対象はすべて報告なし。10% の割当プロファイルは 2,653 サンプルで、RMS launch は 338、residual/MLP の 4 箇所は計 400 サンプルだった（合わせて約 28%）。`tensor_dictionary` は 164 サンプル。これは割当の構成比であり、GPU 実行時間の構成比ではない。次の候補は residual + RMS と MLP gate の融合、および中間バッファの明示的な再利用。
+
+## 最終正規化と mask コピーの削減
+
+- 各層に渡す同じ mask 行のコピーを、各 batch 行につき一度だけ作る形へ変更した。
+- 最終 RMS は列ごとに独立し、readout は末尾列のみ使うため、末尾列を取り出してから正規化する形へ変更した。全系列の最終正規化バッファを作らずに済む。
+- Metal の独立参照検証は系列長 1〜512 と混合言語・padding を含む 12 ケース × 3 回で数値一致を確認。最大 logit 誤差は `3.361702e-5`。
+- M4・Float32・batch 1・長さ 256・101 active tokens の同期付き 20 回計測で、割当は **24,048 → 23,979 回**、heap bytes は **1,172,384 → 1,123,808**（約 4.1% 減）。中央値は **218.8108335 → 219.297833 ms**、新しい min/p95/max は 218.1/231.3/355.1 ms。速度改善は確認できない。記録は `artifacts/metal-validation/benchmark-metal-last-rms.json`。
+- Laya の `residual_norm` は residual 出力と正規化出力を同じ reduction kernel で生成する。Jeff でも post-attention の加算と RMS の融合を次の候補とする。Laya の LayerNorm と Jeff の RMS は統計計算が異なるため、カーネルをそのまま移植せず RMS の数値順序を維持する。
+
+## residual と RMS の融合
+
+- `native_residual_rms` を追加し、Metal では既存の RMS カーネル内で residual を加算・保存してから正規化する。二つの出力バッファは必要だが、独立した加算 broadcast の起動を各層で一回減らす。
+- 通常の RMS/L2 は `Val(false)`、融合版は `Val(true)` で分岐をコンパイル時に確定する。幅 4096 を超える入力は汎用実装に戻す。
+- 実モデルの独立参照検証（12 ケース × 3 回）は通り、最大 logit 誤差 `3.361702e-5`。ログは `/private/tmp/jeff-residual-rms-validation.log`。
+- 同一条件の 20 回計測で **23,979 → 23,103 allocations**、**1,123,808 → 1,093,344 heap bytes**。中央値は **219.297833 → 219.795417 ms** で速度改善は確認できない。min/p95/max は 218.5/232.1/356.6 ms。記録は `artifacts/metal-validation/benchmark-metal-residual-rms.json`。
+- 一方、private free pool は **1,565,655,040 → 3,270,836,224 bytes** に増加した。従来の generic broadcast 出力だった residual も private pool 出力へ変わり、forward 中の中間配列を早期返却していない。ホスト割当の削減だけでは保持 GPU メモリの改善にならない。最終採用の判断には中間バッファの寿命短縮と再計測が必要。
+
+## 層内の private pool 配列の早期返却
+
+- Laya の `release_one!` と Metal 1.11.1 の `record_operation!` を確認。queue roots は配列オブジェクトを保持するが、別の DataRef 所有権を取得するわけではない。自前 pool は物理 MTLBuffer を保持し、同じ queue の後続演算だけに再利用する。
+- `native_release_temporary` は自前 `ReturnBuffer` と現在の queue が一致する場合だけ `Metal.unsafe_free!` を呼ぶ。共有アップロード、重み、外部の Metal 配列は返却しない。汎用 CPU 実装では何もしない。
+- 層内の正規化出力、attention 出力、gate/up 射影、residual、down 射影を最後の消費処理の投入後に返却する。呼び出し元の入力 x はこの関数で返却しない。
+- 独立参照の 12 ケース × 3 回は GC を挟んで通り、最大 logit 誤差は `3.361702e-5`。ログは `/private/tmp/jeff-early-return-validation.log`。保持量・割当・速度の変更後の計測は未実施。
+- その後の 20 回計測では **23,439 allocations / 1,101,408 bytes / 中央値 222.1264165 ms**。pool misses は 2352 → 1796 に減ったが、free bytes は **3,270,836,224 → 4,246,929,408** に増加。目的の保持量削減に失敗し、この早期返却変更は撤回した。記録は `artifacts/metal-validation/benchmark-metal-early-return.json`。pool のサイズ別保持と GC/試行境界を含む寿命設計が必要で、返却追加だけでメモリ改善を主張できない。
+
+## MLP の SiLU と up 乗算の融合
+
+- `native_mlp_gate` で `native_silu.(gate) .* up` を一回の broadcast に融合した。Metal は pooled output に書き込み、SiLU 単独の中間配列と起動を除いた。CPU の汎用実装も融合した式を使う。
+- 実モデル 12 ケース × 3 回は通り、最大 logit 誤差は `3.361702e-5`。同じ M4/F32/B1/L256/101 active tokens の 20 回計測は **21,943 allocations / 1,038,928 bytes / 中央値 214.692375 ms**（min/p95/max 212.6/223.8/346.0 ms）。直前の residual+RMS 版から割当数は約 5.0% 減った。中央値は約 2.3% 減ったが、別試行の時間差であり再現性確認は必要。
+- private free pool は **1,749,647,360 bytes**。サイズ別内訳を `metal_pool_stats().free_buckets` に追加した。2 MiB × 247 個、3.5 MiB × 135 個、6 MiB × 70 個、1 MiB × 226 個で保持量の大部分を占める。割当のサイズだけでなく保持する個数を制御する必要がある。試行終了後の値は peak/resident GPU メモリを直接表さず、GC と回収タイミングにも依存する。
+- 計測結果は `artifacts/metal-validation/benchmark-metal-mlp-gate.json`、検証ログは `/private/tmp/jeff-mlp-gate-validation.log`。
+- 融合後の Profile.Allocs 10% は 2,551 サンプル。pool の生成 3 箇所で 541、通常 RMS launch 270、residual RMS launch 79、MLP gate launch 68、tensor dictionary 178、DeltaNet の decay 式 234 サンプル。これは割当比率であって実行時間比率ではない。ログは `/private/tmp/jeff-mlp-gate-profile.log`。JET は引き続き 6 対象で報告なし。
+- 通常 RMS/L2 の起動では residual 用の二つのダミー MtlArray 引数を `nothing` に変更した。`Val(false)` で該当分岐は除かれるため配列の引数変換・保持は不要。変更後の効果は別計測で確認する。
+- 不要な引数を除いた 20 回計測は **21,943 allocations / 1,027,552 bytes / 中央値 214.029875 ms**。割当数は変わらず、heap bytes は 11,376 bytes 減った。min/p95/max は 212.8/224.9/356.7 ms、private free pool は同じ 1,749,647,360 bytes。記録は `artifacts/metal-validation/benchmark-metal-rms-args.json`。この引数変更による速度改善は確認できない。
+- 最終状態でも実モデル 12 ケース × 3 回が通り、最大 logit 誤差は `3.361702e-5`。既存の MPS/RMS/RoPE プリミティブ検証も通った。実モデル検証ログは `/private/tmp/jeff-rms-args-validation.log`、プリミティブは `/private/tmp/jeff-norm-unused-primitives.log`。

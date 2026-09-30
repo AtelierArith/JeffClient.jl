@@ -184,7 +184,7 @@ scores to CPU are included. GPU measurements wait for completion.
 | Backend | Weight precision | Samples | Median per forward |
 | --- | --- | ---: | ---: |
 | Native Julia CPU (8 BLAS threads) | Float32 | 10 | 1.834 s |
-| Native Julia Metal (fused kernels) | Float32 | 20 | 0.219 s |
+| Native Julia Metal (fused kernels) | Float32 | 20 | 0.214 s |
 | Original Jeff / PyTorch CPU (8 threads) | Float32 | 10 | 2.988 s |
 | Original Jeff / PyTorch MPS | BF16 (original default) | 10 | 0.333 s |
 | Original Jeff / PyTorch MPS | Float32 | 20 | 0.350 s |
@@ -196,15 +196,15 @@ The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 1.86 s and its first forward took 12.94 s
+Julia Metal's model loading took 1.62 s and its first forward took 13.01 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 24,048 Julia heap allocations / 1.17 MB per
+BenchmarkTools measured 21,943 Julia heap allocations / 1.03 MB per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
-fell from 2.492 s to 0.219 s (~11.4× faster). Allocation counts fell from 2,845,912
-to 24,048 (~99.2%), and Julia heap bytes from 145,768,352 to 1,172,384 (~99.2%). Device-only buffers
+fell from 2.492 s to 0.214 s (~11.6× faster). Allocation counts fell from 2,845,912
+to 21,943 (~99.2%), and Julia heap bytes from 145,768,352 to 1,027,552 (~99.3%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -220,8 +220,13 @@ Fixed feed/result keys and direct dictionary construction subsequently reduced
 allocations to 24,048 and heap bytes to 1.17 MB. The 219 ms median was unchanged;
 this step improved host allocation without an observed speed gain.
 
-The trial recorded 6,256 private-buffer reuses and 425 shared-upload reuses.
-It retained about 1.57 GB of free device buffers afterward: reducing allocation
+Mask reuse, last-column final RMS, residual/RMS fusion, and MLP SiLU/up fusion
+then reduced allocations to 21,943 / 1.03 MB after removing unused RMS arguments.
+The latest median was 214 ms;
+small timing differences require repeat measurements.
+
+The trial recorded 7,072 private-buffer reuses and 425 shared-upload reuses.
+It retained about 1.75 GB of free device buffers afterward: reducing allocation
 uses a cache and does not imply lower total resident memory. Private free caches
 are trimmed on allocation pressure at one quarter of the recommended working
 set per queue; retained shared uploads are limited to 64 MB per queue. The pool

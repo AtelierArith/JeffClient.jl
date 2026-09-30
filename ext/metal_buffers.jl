@@ -72,6 +72,17 @@ function metal_pool_stats()
         misses = BUFFER_MISSES[],
         reuses = BUFFER_REUSES[],
         free_bytes = get(BUFFER_POOL_BYTES, queue, 0),
+        free_buckets = sort(
+            [
+                (
+                    buffer_bytes = key[3],
+                    buffers = length(buffers),
+                    total_bytes = key[3] * length(buffers),
+                ) for (key, buffers) in BUFFER_POOL if key[1] == queue && !isempty(buffers)
+            ];
+            by = bucket -> bucket.total_bytes,
+            rev = true,
+        ),
         upload_misses = UPLOAD_MISSES[],
         upload_reuses = UPLOAD_REUSES[],
         upload_pending_bytes = get(UPLOAD_PENDING_BYTES, queue, 0),

@@ -1,8 +1,20 @@
 # One logical 32-lane SIMD group normalizes a column. Fixed-size tuples keep
 # inputs in registers through the reduction and output, without scratch arrays.
+function JeffClient.native_mlp_gate(
+    gate::Metal.MtlMatrix{Float32},
+    up::Metal.MtlMatrix{Float32},
+)
+    size(gate) == size(up) || throw(DimensionMismatch("MLP gate and up shapes must match."))
+    output = pooled_array(Float32, size(gate))
+    output .= JeffClient.native_silu.(gate) .* up
+    return output
+end
+
 function normalization_kernel!(
     output,
     input,
+    added,
+    residual,
     weight,
     eps,
     factor,
@@ -12,7 +24,8 @@ function normalization_kernel!(
     ::Val{MEAN},
     ::Val{CENTERED},
     ::Val{WEIGHTED},
-) where {PARTS,MEAN,CENTERED,WEIGHTED}
+    ::Val{RESIDUAL},
+) where {PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL}
     local_index = Metal.thread_position_in_threadgroup_2d()
     group = Metal.threadgroup_position_in_grid_2d().x
     lane = Int32(local_index.x)
@@ -21,7 +34,16 @@ function normalization_kernel!(
         offset = (column - Int32(1)) * width
         values = ntuple(Val(PARTS)) do part
             row = lane + Int32(32 * (part - 1))
-            row <= width ? (@inbounds input[offset+row]) : 0.0f0
+            if row <= width
+                value = @inbounds input[offset+row]
+                if RESIDUAL
+                    value += @inbounds added[offset+row]
+                    @inbounds residual[offset+row] = value
+                end
+                value
+            else
+                0.0f0
+            end
         end
         # Laya uses an explicit accumulator here. Base's tuple map/sum at
         # 32 elements crashed LLVM's Metal inliner on the real hidden width.
@@ -55,6 +77,8 @@ function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
         output,
         x,
+        nothing,
+        nothing,
         weight,
         Float32(eps),
         Float32(factor),
@@ -64,8 +88,48 @@ function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
         mean,
         centered,
         weighted,
+        Val(false),
     )
     return output
+end
+
+function JeffClient.native_residual_rms(
+    x::Metal.MtlMatrix{Float32},
+    mixed::Metal.MtlMatrix{Float32},
+    weight,
+    eps,
+)
+    size(x) == size(mixed) || throw(DimensionMismatch("Residual shapes must match."))
+    length(weight) == size(x, 1) ||
+        throw(DimensionMismatch("RMS weight width must match the input."))
+    size(x, 1) > 4096 && return invoke(
+        JeffClient.native_residual_rms,
+        Tuple{Any,Any,Any,Any},
+        x,
+        mixed,
+        weight,
+        eps,
+    )
+    residual = pooled_array(Float32, size(x))
+    output = pooled_array(Float32, size(x))
+    width, columns = size(x)
+    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
+        output,
+        x,
+        mixed,
+        residual,
+        weight,
+        Float32(eps),
+        1.0f0,
+        Int32(width),
+        Int32(columns),
+        Val(cld(width, 32)),
+        Val(true),
+        Val(true),
+        Val(true),
+        Val(true),
+    )
+    return residual, output
 end
 
 function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered = true)

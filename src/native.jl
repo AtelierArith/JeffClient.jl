@@ -305,16 +305,23 @@ function delta_attention(attention, x, mask, cfg)
     return native_linear(attention.out, out)
 end
 
+native_residual_rms(x, mixed, weight, eps) = begin
+    residual = x .+ mixed
+    residual, native_rms(residual, weight, eps)
+end
+
+native_mlp_gate(gate, up) = native_silu.(gate) .* up
+
 function native_layer(layer, x, mask, cfg)
     normalized = native_rms(x, layer.input_norm, cfg.eps)
     mixed =
         layer.attention.kind == :full ?
         full_attention(layer.attention, normalized, mask, cfg) :
         delta_attention(layer.attention, normalized, mask, cfg)
-    residual = x .+ mixed
-    normalized = native_rms(residual, layer.post_norm, cfg.eps)
-    gate = native_silu.(native_linear(layer.mlp.gate, normalized))
-    mlp = native_linear(layer.mlp.down, gate .* native_linear(layer.mlp.up, normalized))
+    residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
+    gate = native_linear(layer.mlp.gate, normalized)
+    up = native_linear(layer.mlp.up, normalized)
+    mlp = native_linear(layer.mlp.down, native_mlp_gate(gate, up))
     return residual .+ mlp
 end
 
@@ -343,12 +350,13 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
     result = Matrix{Float32}(undef, size(ids, 1), size(backend.readout, 2))
     for row in axes(ids, 1)
         hidden = native_gather(backend.embedding, vec(ids[row, :]))
+        row_mask = vec(mask[row, :])
         for layer in backend.layers
-            hidden = native_layer(layer, hidden, vec(mask[row, :]), backend.config)
+            hidden = native_layer(layer, hidden, row_mask, backend.config)
         end
-        hidden = native_rms(hidden, backend.final_norm, backend.config.eps)
-        result[row, :] .=
-            vec(native_host(native_linear(backend.readout, hidden[:, end:end])))
+        # RMS normalizes each column independently; readout needs only the last.
+        hidden = native_rms(hidden[:, end:end], backend.final_norm, backend.config.eps)
+        result[row, :] .= vec(native_host(native_linear(backend.readout, hidden)))
     end
     return result
 end

@@ -148,8 +148,8 @@ extension methods at that stage.
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.219 s**, original Python MPS
-**0.350 s**. Julia heap: **24,048 allocations / 1,172,384 bytes**. This is ~11.4×
+20 warmed synchronized calls: Julia Metal **0.214 s**, original Python MPS
+**0.350 s**. Julia heap: **21,943 allocations / 1,027,552 bytes**. This is ~11.6×
 faster than the 2.492 s implementation, with ~99.2% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
@@ -160,9 +160,10 @@ clean. Direct feed construction reduced allocations by another 15.4% while
 median latency remained unchanged. RMS launches and residual/MLP sites account
 for about 28% of the latest 10% allocation sample; buffer wrappers also remain.
 
-The benchmark retained ~1.57 GB of private pooled buffers; this is not peak GPU
+The benchmark retained ~1.75 GB of private pooled buffers; this is not peak GPU
 memory. The timing range is broad, so tail-latency improvement is not established.
-Next work: fused residual/normalization and MLP gates;
+Residual/RMS and MLP SiLU/up fusion are implemented and reference-verified.
+Next work: repeat timing and inspect pool size/counts;
 explicit intermediate release for reuse within a forward; reusable workspaces
 and MPS feed descriptors. Reduce remaining heap allocations and measure each
 change while preserving independent-reference agreement. Detailed findings
