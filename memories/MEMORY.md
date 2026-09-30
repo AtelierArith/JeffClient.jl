@@ -468,3 +468,10 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-recurrent-handles-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-recurrent-handles.json` へ保存する。型検査・全割当Profileは未実施。
 - B1/L256/active101/F32/workspace有効・20回は **4,479 allocations / 237,264 bytes / 中央値193.2585835 ms**、min/p95/max192.815375/193.747042/194.055833 ms。直前4,695 / 249,360から216件 / 12,096 bytes減。中央値193.334437 msと同程度で、追加の速度改善はない。型検査・全割当Profileは `/private/tmp/jeff-recurrent-handles-profile.log` で実行する。
 - 上記Profileは完了し、JET6対象すべて報告なし、全割当4,479件。KernelState206・MPS wrapper13・TD187は変わらない。主要幅のhost型分岐とhandle再利用で割当を減らし、GPU起動や演算を省いた結果ではない。
+
+## RoPE 起動の主要幅での kernel handle cache 候補
+
+- 最新全割当Profileでquery/key起動は168/167件を記録した。head_dim256に限りVal(8)とqueryフラグを確定したhelperで既存cached launchを使う候補を追加し、他の幅は従来macroを使う。GPU算術・配置・所有は変更しない。単体検証は `/private/tmp/jeff-rope-handles-primitives.log`。性能・実モデル・型検査は未完了。
+- 単体検証と実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`（`/private/tmp/jeff-rope-handles-validation.log`）。同条件20回を `artifacts/metal-validation/benchmark-metal-rope-handles.json` へ保存する。型検査・全割当Profileは未実施。
+- B1/L256/active101/F32/workspace有効・20回は **4,335 allocations / 228,624 bytes / 中央値193.601583 ms**、min/p95/max192.9335/194.211375/194.252416 ms。直前4,479 / 237,264から144件 / 8,640 bytes減。中央値193.2585835 msとの差は小さく分布も重なり、追加速度改善はない。型検査・全割当Profileは `/private/tmp/jeff-rope-handles-profile.log` で実行する。
+- 上記Profileは完了し、JET6対象すべて報告なし、全割当4,335件。KernelState206・MPS wrapper13・TD187は変わらない。次のTD再利用候補を調べると、graph_tensor_dataは未登録arrayを「現在のcursor位置のslotと同一」のときだけ登録しており、過去slotのnormalization出力などはworkspace所有でも初回登録されない。所有slotのidentityを検証できる索引と、形状変更・clear・例外・GCの検証が必要。reshape wrapperを無条件に登録すると別形状のmetadataや一時ownerを誤って保持するため、その経路は分けて検討する。

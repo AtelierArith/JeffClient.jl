@@ -96,6 +96,40 @@ function normalized_rope_kernel!(
     return
 end
 
+function launch_model_rope!(
+    output,
+    value_output,
+    projection,
+    value_projection,
+    weight,
+    tables,
+    cfg,
+    length,
+    ::Val{QUERY},
+) where {QUERY}
+    launch_cached_kernel!(
+        normalized_rope_kernel!,
+        output,
+        value_output,
+        projection,
+        value_projection,
+        weight,
+        tables[1],
+        tables[2],
+        Int32(cfg.head_dim),
+        Int32(cfg.heads),
+        Int32(QUERY ? cfg.heads : cfg.kv_heads),
+        Int32(length),
+        Int32(cfg.rotary_dim ÷ 2),
+        cfg.eps,
+        Val(8),
+        Val(QUERY);
+        threads = (32, 8),
+        groups = (cld(length * cfg.heads, 8), 1),
+    )
+    return nothing
+end
+
 function prepare_query(projection, weight, tables, cfg, length)
     size(projection) == (2cfg.head_dim * cfg.heads, length) &&
     Base.length(weight) == cfg.head_dim || throw(
@@ -104,6 +138,20 @@ function prepare_query(projection, weight, tables, cfg, length)
         ),
     )
     output = pooled_array(Float32, (cfg.head_dim, length, cfg.heads))
+    if cfg.head_dim == 256
+        launch_model_rope!(
+            output,
+            output,
+            projection,
+            projection,
+            weight,
+            tables,
+            cfg,
+            length,
+            Val(true),
+        )
+        return output
+    end
     Metal.@metal threads=(32, 8) groups=(cld(length * cfg.heads, 8), 1) normalized_rope_kernel!(
         output,
         output,
@@ -134,6 +182,20 @@ function prepare_key_value(key_projection, value_projection, weight, tables, cfg
     )
     key = pooled_array(Float32, (cfg.head_dim, length, cfg.heads))
     value = pooled_array(Float32, size(key))
+    if cfg.head_dim == 256
+        launch_model_rope!(
+            key,
+            value,
+            key_projection,
+            value_projection,
+            weight,
+            tables,
+            cfg,
+            length,
+            Val(false),
+        )
+        return key, value
+    end
     Metal.@metal threads=(32, 8) groups=(cld(length * cfg.heads, 8), 1) normalized_rope_kernel!(
         key,
         value,
