@@ -25,8 +25,52 @@ function measure_stage(name, f, args)
 end
 
 function mlp_projection(mlp, x)
-    gate = JeffClient.native_silu.(JeffClient.native_linear(mlp.gate, x))
-    return JeffClient.native_linear(mlp.down, gate .* JeffClient.native_linear(mlp.up, x))
+    gate = JeffClient.native_linear(mlp.gate, x)
+    up = JeffClient.native_linear(mlp.up, x)
+    return JeffClient.native_linear(mlp.down, JeffClient.native_mlp_gate!(gate, up))
+end
+
+function delta_input_projections(attention, x)
+    return (
+        JeffClient.native_linear(attention.qkv, x),
+        JeffClient.native_linear(attention.z, x),
+        JeffClient.native_linear(attention.b, x),
+        JeffClient.native_linear(attention.a, x),
+    )
+end
+
+function delta_recurrent_stage(
+    extension,
+    query,
+    key,
+    mixed,
+    beta,
+    decay,
+    cfg,
+    ::Val{ROWS} = Val(8),
+    ::Val{PRECOMPUTED} = Val(false),
+) where {ROWS,PRECOMPUTED}
+    sequence_length = size(mixed, 2)
+    output =
+        extension.pooled_array(Float32, (cfg.value_dim, cfg.value_heads, sequence_length))
+    rows = ROWS
+    Metal.@metal threads=(32, rows) groups=(cld(cfg.value_dim, rows), cfg.value_heads) extension.delta_recurrent_kernel!(
+        output,
+        query,
+        key,
+        mixed,
+        beta,
+        decay,
+        Int32(cfg.key_dim),
+        Int32(cfg.value_dim),
+        Int32(2cfg.key_dim * cfg.key_heads),
+        Int32(cfg.value_heads ÷ cfg.key_heads),
+        Int32(sequence_length),
+        Val(cld(cfg.key_dim, 32)),
+        Val(rows),
+        Val(PRECOMPUTED),
+    )
+    return output
 end
 
 function main()
@@ -43,9 +87,71 @@ function main()
     mask = Int64.(first(sample["inputs"]["attention_mask"]))
     backend = NativeBackend(ARGS[1]; device = :metal)
     hidden = JeffClient.native_gather(backend.embedding, ids)
+    prepared_mask = JeffClient.native_prepare_mask(hidden, mask)
     delta = first(layer for layer in backend.layers if layer.attention.kind == :delta)
     full = first(layer for layer in backend.layers if layer.attention.kind == :full)
     mixed = JeffClient.native_linear(delta.attention.qkv, hidden)
+    extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    cfg = backend.config
+    masked = hidden .* reshape(prepared_mask.device, 1, :)
+    delta_mixed = JeffClient.causal_depthwise(
+        JeffClient.native_linear(delta.attention.qkv, masked),
+        delta.attention.conv,
+    )
+    query =
+        extension.packed_qk(delta_mixed, cfg, length(ids), 0, sqrt(Float32(cfg.key_dim)))
+    key = extension.packed_qk(
+        delta_mixed,
+        cfg,
+        length(ids),
+        cfg.key_dim * cfg.key_heads,
+        1.0f0,
+    )
+    beta = JeffClient.native_sigmoid.(JeffClient.native_linear(delta.attention.b, masked))
+    decay =
+        delta.attention.a_decay .* JeffClient.native_softplus.(
+            JeffClient.native_linear(delta.attention.a, masked) .+ delta.attention.dt_bias,
+        )
+    gate = reshape(
+        JeffClient.native_linear(delta.attention.z, masked),
+        cfg.value_dim,
+        cfg.value_heads,
+        length(ids),
+    )
+    recurrent = delta_recurrent_stage(extension, query, key, delta_mixed, beta, decay, cfg)
+    reference_recurrent = Array(recurrent)
+    decay_factor = exp.(decay)
+    factor_recurrent = Array(
+        delta_recurrent_stage(
+            extension,
+            query,
+            key,
+            delta_mixed,
+            beta,
+            decay_factor,
+            cfg,
+            Val(8),
+            Val(true),
+        ),
+    )
+    isapprox(factor_recurrent, reference_recurrent; atol = 2.0f-5, rtol = 2.0f-5) ||
+        error("Precomputed decay factor mismatch.")
+    for rows in (1, 4, 16)
+        probe = Array(
+            delta_recurrent_stage(
+                extension,
+                query,
+                key,
+                delta_mixed,
+                beta,
+                decay,
+                cfg,
+                Val(rows),
+            ),
+        )
+        isapprox(probe, reference_recurrent; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Recurrent threadgroup configuration mismatch.")
+    end
     # Isolated, synchronized stage costs diagnose kernels/submission overhead.
     # They are not additive: complete forwards batch operations differently.
     results = [
@@ -53,12 +159,12 @@ function main()
             (
                 "DeltaNet attention",
                 JeffClient.delta_attention,
-                (delta.attention, hidden, mask, backend.config),
+                (delta.attention, hidden, prepared_mask, backend.config),
             ),
             (
                 "full attention",
                 JeffClient.full_attention,
-                (full.attention, hidden, mask, backend.config),
+                (full.attention, hidden, prepared_mask, backend.config),
             ),
             ("MLP projections", mlp_projection, (delta.mlp, hidden)),
             (
@@ -72,11 +178,60 @@ function main()
                 (mixed, delta.attention.conv),
             ),
             ("QKV projection", JeffClient.native_linear, (delta.attention.qkv, hidden)),
+            (
+                "DeltaNet input projections",
+                delta_input_projections,
+                (delta.attention, masked),
+            ),
+            (
+                "DeltaNet recurrent",
+                delta_recurrent_stage,
+                (extension, query, key, delta_mixed, beta, decay, cfg),
+            ),
+            (
+                "DeltaNet RMS/SiLU gate",
+                extension.rms_silu_gate,
+                (recurrent, gate, delta.attention.norm, cfg.eps),
+            ),
         )
     ]
+    append!(
+        results,
+        [
+            measure_stage(
+                "DeltaNet recurrent rows=$rows",
+                delta_recurrent_stage,
+                (extension, query, key, delta_mixed, beta, decay, cfg, Val(rows)),
+            ) for rows in (1, 4, 16)
+        ],
+    )
+    push!(
+        results,
+        measure_stage(
+            "DeltaNet recurrent precomputed factor",
+            delta_recurrent_stage,
+            (
+                extension,
+                query,
+                key,
+                delta_mixed,
+                beta,
+                decay_factor,
+                cfg,
+                Val(8),
+                Val(true),
+            ),
+        ),
+    )
     report = Dict(
         "device" => string(Metal.device().name),
+        "julia_version" => string(VERSION),
+        "metal_version" => string(pkgversion(Metal)),
         "sequence_length" => length(ids),
+        "active_tokens" => count(!iszero, mask),
+        "recurrent_baseline_rows" => 8,
+        "recurrent_variant_rows" => [1, 4, 16],
+        "timing_scope" => "isolated stages with GPU completion; not additive",
         "samples_per_stage" => 10,
         "stages" => results,
     )

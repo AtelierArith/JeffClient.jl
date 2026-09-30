@@ -184,27 +184,27 @@ scores to CPU are included. GPU measurements wait for completion.
 | Backend | Weight precision | Samples | Median per forward |
 | --- | --- | ---: | ---: |
 | Native Julia CPU (8 BLAS threads) | Float32 | 10 | 1.834 s |
-| Native Julia Metal (fused kernels) | Float32 | 20 | 0.203 s |
+| Native Julia Metal (default settings) | Float32 | 20 | 0.200 s |
 | Original Jeff / PyTorch CPU (8 threads) | Float32 | 10 | 2.988 s |
 | Original Jeff / PyTorch MPS | BF16 (original default) | 10 | 0.333 s |
 | Original Jeff / PyTorch MPS | Float32 | 20 | 0.350 s |
 
 For this prepared batch-1 case, Julia Metal takes about **43% less time than
-PyTorch MPS at the same Float32 precision** (~1.74× throughput). This comparison
+PyTorch MPS at the same Float32 precision** (~1.75× throughput). This comparison
 does not establish performance for other lengths or batch sizes.
 The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 2.33 s and its first forward took 11.93 s
+Julia Metal's model loading took 2.45 s and its first forward took 11.39 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 14,179 Julia heap allocations / 0.65 MB per
+BenchmarkTools measured 13,850 Julia heap allocations / 638,720 bytes per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
-fell from 2.492 s to 0.203 s (~12.3× faster). Allocation counts fell from 2,845,912
-to 14,179 (~99.5%), and Julia heap bytes from 145,768,352 to 651,632 (~99.6%). Device-only buffers
+fell from 2.492 s to 0.200 s (~12.4× faster). Allocation counts fell from 2,845,912
+to 13,850 (~99.5%), and Julia heap bytes from 145,768,352 to 638,720 (~99.6%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -226,9 +226,13 @@ Cached decay coefficients and a shared per-row device mask then reduced
 allocations to 20,318 / 0.94 MB. Reading packed Q/K directly while normalizing,
 and reading packed V in the recurrent kernel, reduced this to 17,012 / 0.76 MB.
 RMS/SiLU gate fusion, in-place residual/MLP activation, and fixed-length MPS
-pointer storage then reduced allocations to 14,179 / 0.65 MB. The latest
+pointer storage then reduced allocations to 14,179 / 0.65 MB. That trial's
 median/minimum/p95/maximum were 203/198/217/369 ms. These allocation reductions
 did not produce a confirmed incremental speed gain; tail latency remains variable.
+Weight tensor-data reuse and dedicated embedding gather subsequently reduced
+the default path to 13,850 allocations / 638,720 bytes. Its median/minimum/p95/
+maximum were 200/198/207/243 ms. The opt-in workspace measurements are described
+below separately.
 
 The latest free private cache snapshots were 1.71/6.00/4.77 GB after
 trial/full GC/explicit trim. The cache limit is one quarter of recommended
@@ -299,6 +303,14 @@ improvement has not been established. It retains 393 arrays / 838,434,816
 device-buffer bytes and 199 tensor-data objects; these bytes are separate from
 the free pool and exclude weights and native MPS resources. This option remains
 disabled by default while its lifetime and memory behavior are evaluated.
+To release the current task's workspace references after using it:
+
+```julia
+Base.get_extension(JeffClient, :JeffClientMetalExt).clear_forward_workspace!()
+```
+
+This waits for GPU completion and drops cached references. Buffer return still
+uses normal ownership and GC; it does not immediately free all resident memory.
 The latest type check reports no JET errors for the six inspected JeffClient
 and Metal-extension targets; normalization's Bool dispatch is explicitly split.
 

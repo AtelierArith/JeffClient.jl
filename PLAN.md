@@ -148,8 +148,8 @@ extension methods at that stage.
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.203 s**, original Python MPS
-**0.350 s**. Julia heap: **14,179 allocations / 651,632 bytes**. This is ~12.3×
+20 warmed synchronized calls: Julia Metal **0.200 s**, original Python MPS
+**0.350 s**. Julia heap: **13,850 allocations / 638,720 bytes**. This is ~12.4×
 faster than the 2.492 s implementation, with ~99.5% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including

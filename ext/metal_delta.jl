@@ -23,7 +23,8 @@ function delta_recurrent_kernel!(
     length,
     ::Val{KEY_VALUES},
     ::Val{ROWS},
-) where {KEY_VALUES,ROWS}
+    ::Val{PRECOMPUTED} = Val(false),
+) where {KEY_VALUES,ROWS,PRECOMPUTED}
     local_index = Metal.thread_position_in_threadgroup_2d()
     group_index = Metal.threadgroup_position_in_grid_2d()
     lane = Int32(local_index.x)
@@ -41,7 +42,7 @@ function delta_recurrent_kernel!(
             component = lane + Int32(32 * (part - 1))
             component <= key_dim ? query[component, key_head, token] : 0.0f0
         end
-        factor = exp(decay[head, token])
+        factor = PRECOMPUTED ? decay[head, token] : exp(decay[head, token])
         state = map(s -> s * factor, state)
         prediction = warp_sum(sum(map(*, state, keys)))
         v =
@@ -113,6 +114,60 @@ function packed_qk(mixed, cfg, length, start, factor)
     return output
 end
 
+function packed_qk_pair_kernel!(
+    query,
+    key,
+    mixed,
+    width,
+    heads,
+    channels,
+    columns,
+    factor,
+    parts,
+)
+    packed_qk_kernel!(
+        query,
+        mixed,
+        width,
+        heads,
+        channels,
+        columns,
+        Int32(0),
+        factor,
+        parts,
+    )
+    packed_qk_kernel!(
+        key,
+        mixed,
+        width,
+        heads,
+        channels,
+        columns,
+        width * heads,
+        1.0f0,
+        parts,
+    )
+    return
+end
+
+function packed_qk_pair(mixed, cfg, length)
+    query = pooled_array(Float32, (cfg.key_dim, cfg.key_heads, length))
+    key = pooled_array(Float32, (cfg.key_dim, cfg.key_heads, length))
+    columns = cfg.key_heads * length
+    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) packed_qk_pair_kernel!(
+        query,
+        key,
+        mixed,
+        Int32(cfg.key_dim),
+        Int32(cfg.key_heads),
+        Int32(size(mixed, 1)),
+        Int32(columns),
+        sqrt(Float32(cfg.key_dim)),
+        Val(cld(cfg.key_dim, 32)),
+    )
+    return query, key
+end
+
 function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask, cfg)
     # Keep the stable chunked implementation available for unsupported widths.
     cfg.key_dim > 256 && return invoke(
@@ -130,8 +185,7 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         attention.conv,
     )
     key_width = cfg.key_dim * cfg.key_heads
-    query = packed_qk(mixed, cfg, length, 0, sqrt(Float32(cfg.key_dim)))
-    key = packed_qk(mixed, cfg, length, key_width, 1.0f0)
+    query, key = packed_qk_pair(mixed, cfg, length)
     beta = JeffClient.native_sigmoid.(JeffClient.native_linear(attention.b, masked))
     decay =
         attention.a_decay .* JeffClient.native_softplus.(

@@ -101,11 +101,24 @@ mutable struct ForwardWorkspace
     queue::UInt
     slots::Vector{Any}
     tensor_data::Dict{UInt,Vector{MPSGraphTensorData}}
+    feed_values::Dict{UInt,Vector{MPSGraphTensorData}}
     cursor::Int
     active::Bool
 end
 
 const FORWARD_WORKSPACE_KEY = :JeffClientMetalForwardWorkspace
+
+function clear_forward_workspace!()
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    workspace isa ForwardWorkspace || return nothing
+    workspace.active && throw(ArgumentError("Cannot clear an active forward workspace."))
+    Metal.synchronize()
+    empty!(workspace.tensor_data)
+    empty!(workspace.feed_values)
+    empty!(workspace.slots)
+    delete!(task_local_storage(), FORWARD_WORKSPACE_KEY)
+    return nothing
+end
 
 function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
     workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
@@ -121,6 +134,7 @@ function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
         array = fresh_pooled_array(T, dims)
         if slot <= length(workspace.slots)
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
+            pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
             workspace.slots[slot] = array
         else
             push!(workspace.slots, array)
@@ -140,6 +154,7 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
             queue,
             Any[],
             Dict{UInt,Vector{MPSGraphTensorData}}(),
+            Dict{UInt,Vector{MPSGraphTensorData}}(),
             0,
             false,
         )
@@ -157,8 +172,14 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         workspace.active = false
         for slot = (workspace.cursor+1):length(workspace.slots)
             pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
+            pop!(workspace.feed_values, objectid(workspace.slots[slot]), nothing)
         end
         resize!(workspace.slots, workspace.cursor)
+        # GPU completion precedes this cleanup. Keep reusable containers but
+        # replace input/weight bindings with an already-owned output binding.
+        for (key, values) in workspace.feed_values
+            fill!(values, workspace.tensor_data[key][1])
+        end
     end
 end
 
@@ -178,6 +199,8 @@ function metal_pool_stats()
         reuses = BUFFER_REUSES[],
         free_bytes = get(BUFFER_POOL_BYTES, queue, 0),
         workspace_arrays = workspace_arrays,
+        workspace_feed_vectors = workspace isa ForwardWorkspace ?
+                                 length(workspace.feed_values) : 0,
         workspace_bytes = workspace_bytes,
         workspace_tensor_data = workspace isa ForwardWorkspace ?
                                 length(workspace.tensor_data) : 0,

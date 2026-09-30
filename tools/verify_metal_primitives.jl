@@ -35,6 +35,7 @@ function main()
         weight = Metal.MtlArray(host_weight)
         previous_array = nothing
         previous_values = nothing
+        previous_feeds = nothing
         for sequence_length in (9, 9, 1, 1, 65, 65)
             input = reshape(cos.(Float32.(1:7sequence_length)), 7, sequence_length)
             device_input = Metal.MtlArray(input)
@@ -50,14 +51,38 @@ function main()
             workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
             array = only(workspace.slots)
             values = workspace.tensor_data[objectid(array)]
+            feeds = workspace.feed_values[objectid(array)]
+            all(value -> value === values[1], feeds) ||
+                error("Completed feed retains input bindings.")
+            length(workspace.feed_values) == 1 || error("Stale workspace feed values.")
             length(workspace.tensor_data) == 1 || error("Stale workspace tensor-data.")
             if previous_array !== nothing && size(previous_array) == size(array)
                 array === previous_array || error("Workspace array was not reused.")
                 values === previous_values || error("Result value Vector was not reused.")
+                feeds === previous_feeds || error("Feed value Vector was not reused.")
             end
             previous_array, previous_values = array, values
+            previous_feeds = feeds
             GC.gc(true)
         end
+        workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+        failed = try
+            JeffClient.native_forward_scope(weight) do
+                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 3)))
+                error("workspace failure probe")
+            end
+            false
+        catch exception
+            exception isa ErrorException && exception.msg == "workspace failure probe" || rethrow()
+            true
+        end
+        failed && !workspace.active || error("Workspace exception cleanup failed.")
+        extension.clear_forward_workspace!()
+        isempty(workspace.slots) && isempty(workspace.tensor_data) ||
+            error("Workspace retains slots after clear.")
+        isempty(workspace.feed_values) || error("Workspace retains feeds after clear.")
+        !haskey(task_local_storage(), extension.FORWARD_WORKSPACE_KEY) ||
+            error("Workspace remains task-local after clear.")
     finally
         if previous_workspace_setting === nothing
             delete!(ENV, "JEFF_METAL_WORKSPACE")
@@ -251,8 +276,17 @@ function main()
         expected_k = expected_k ./ sqrt.(sum(abs2, expected_k; dims = 1) .+ 1.0f-6)
         isapprox(q, expected_q; atol = 2.0f-6, rtol = 2.0f-5) || error("Packed Q mismatch.")
         isapprox(k, expected_k; atol = 2.0f-6, rtol = 2.0f-5) || error("Packed K mismatch.")
+        paired_q, paired_k = extension.packed_qk_pair(gpu_mixed, cfg, length)
+        isapprox(Array(paired_q), expected_q; atol = 2.0f-6, rtol = 2.0f-5) ||
+            error("Paired packed Q mismatch.")
+        isapprox(Array(paired_k), expected_k; atol = 2.0f-6, rtol = 2.0f-5) ||
+            error("Paired packed K mismatch.")
         beta = fill(0.5f0, value_heads, length)
-        decay = fill(-0.1f0, value_heads, length)
+        decay = reshape(
+            range(-12.0f0, 0.0f0; length = value_heads * length),
+            value_heads,
+            length,
+        )
         gpu_q, gpu_k, gpu_beta, gpu_decay = Metal.MtlArray.((q, k, beta, decay))
         output = extension.pooled_array(Float32, (value_width, value_heads, length))
         Metal.@metal threads=(32, 8) groups=(cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
@@ -288,6 +322,25 @@ function main()
         end
         isapprox(Array(output), expected; atol = 2.0f-5, rtol = 2.0f-4) ||
             error("Packed V recurrent mismatch.")
+        gpu_factor = exp.(gpu_decay)
+        Metal.@metal threads=(32, 8) groups=(cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
+            output,
+            gpu_q,
+            gpu_k,
+            gpu_mixed,
+            gpu_beta,
+            gpu_factor,
+            Int32(width),
+            Int32(value_width),
+            Int32(2key_width),
+            Int32(2),
+            Int32(length),
+            Val(cld(width, 32)),
+            Val(8),
+            Val(true),
+        )
+        isapprox(Array(output), expected; atol = 2.0f-5, rtol = 2.0f-4) ||
+            error("Precomputed decay-factor recurrent mismatch.")
         GC.gc(true)
     end
     println("Validated packed Q/K normalization and direct V recurrent reads.")

@@ -202,6 +202,21 @@ function result_tensor_values(matrix, shape)
     return MPSGraphTensorData[data]
 end
 
+new_feed_values() = Vector{MPSGraphTensorData}(undef, 2)
+
+function feed_tensor_values(output, left, right)
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    if workspace isa ForwardWorkspace && workspace.active
+        key = objectid(output)
+        if haskey(workspace.tensor_data, key)
+            values = get!(new_feed_values, workspace.feed_values, key)
+            values[1], values[2] = left, right
+            return values
+        end
+    end
+    return MPSGraphTensorData[left, right]
+end
+
 function tensor_dictionary(
     keys::Base.RefValue{NTuple{N,id{MPSGraphTensor}}},
     values::Vector{MPSGraphTensorData},
@@ -244,12 +259,13 @@ end
     end
     # Fixed keys and shapes belong to the graph. Only the tensor-data values
     # change per product; avoid Julia Dict and its keys/values conversion copies.
-    feed_values = MPSGraphTensorData[
+    result_values = result_tensor_values(c, cached.shape_c)
+    feed_values = feed_tensor_values(
+        c,
         immutable_a ? weight_tensor_data(a, cached.shape_a) :
         graph_tensor_data(a, cached.shape_a),
         graph_tensor_data(b, cached.shape_b),
-    ]
-    result_values = result_tensor_values(c, cached.shape_c)
+    )
     feeds = tensor_dictionary(cached.feed_key_ids, feed_values, Val(2))
     results = tensor_dictionary(cached.result_key_ids, result_values, Val(1))
     queue = Metal.global_queue(Metal.device())

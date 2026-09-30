@@ -288,3 +288,45 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - result Vector再利用版でもJET6対象はすべて報告なし。
 - forward scopeを導入したCPU経路もfixture5入力に合格し、最大誤差 `3.874302e-7`。ログは `/private/tmp/jeff-workspace-cpu-validation.log`。workspace無効の通常Metal経路は `/private/tmp/jeff-default-gather-validation.log` で独立参照検証を実行する。
 - workspace無効の通常Metal経路も12ケース×3回に合格し、最大logit誤差 `3.361702e-5`。通常・workspace両方の数値検証を確認した状態で今回の変更をまとめる。workspaceは引き続きopt-inで、既定有効化や全goalの完了を意味しない。
+- 通常設定の同条件20回は **13,850 allocations / 638,720 bytes / 中央値200.2005 ms**。min/p95/max198.0/207.2/243.1 ms。poolはtrial/GC/trim後 **1,706,786,816 / 5,996,544,000 / 4,765,515,776 bytes**、workspace配列0。結果は `artifacts/metal-validation/benchmark-metal-default-gather.json`。workspace採用版10,479 / 529,120に比べ、workspaceは3,371 allocations / 109,600 bytesを省くが、両測定から速度改善は確定できない。
+- 段階別測定toolのMLPを現在のin-place gateへ合わせ、attentionには準備済みmaskを渡すよう修正した。段階ごとに同期するため、各時間はfull forwardへ単純加算できない。結果の保存先は `artifacts/metal-validation/benchmark-stages-current.json`。
+- 段階別測定（M4/F32/L256、各10回、個別同期）は DeltaNet attention **11.170042 ms**、full attention **3.632208 ms**、MLP **4.314021 ms**、RMS **0.4515415 ms**、depthwise convolution **0.8551875 ms**、QKV projection **1.570125 ms**。DeltaNetが測定した単独attentionの中で重く、18層で使われる。full forwardはcommandをまとめるため、層数を掛けて総時間や割合を算出しない。次はDeltaNet内のrecurrentと射影・正規化を分けて測る。
+- 分解測定 `benchmark-stages-delta.json` はrecurrent **4.6479995 ms**、入力4射影 **2.1765625 ms**、RMS/SiLU gate **0.49375 ms**。DeltaNet全体8.97775 ms。別々に同期するため加算不可で、今回QKV単独3.380333 msが4射影より長いなど測定間の揺らぎもある。順位の手掛かりとして扱い、変更の効果はfull forwardの同条件測定で確認する。
+- recurrent threadgroupの行数1/4/8/16を比較するtoolを追加した。各設定で同じ入力の出力が一致することを確認してから同期込み測定を行う。製品側のrows=8はまだ変更していない。結果の保存先は `artifacts/metal-validation/benchmark-stages-recurrent-rows.json`。
+- 行数比較は数値一致の確認を通り、各10回のrecurrent中央値は rows=8 **4.7519165 ms**、rows=1 **4.576896 ms**、rows=4 **4.901875 ms**、rows=16 **4.6105625 ms**。各設定の割当は50/2,240 bytesで同じ。小さな差かつ個別同期の結果なので速度改善を確定しない。rows=1を候補として製品側へ仮適用し、実モデル検証を `/private/tmp/jeff-recurrent-row1-validation.log` に実行する。full forwardで改善を確認できなければrows=8へ戻す。
+- rows=1候補の独立参照12ケース×3回は通り、最大logit誤差 `3.361702e-5`。同期・readout・CPU返却込みの20回測定を `artifacts/metal-validation/benchmark-metal-recurrent-row1.json` に保存する。workspace有効の条件で直前のrows=8・result Vector再利用版と比較する。
+- rows=1のfull forward20回は **199.2289795 ms / 10,479 allocations / 529,120 bytes**。min/p95/max197.4/203.7/203.9 ms。直前rows=8の204.7490835 msより短いが、過去のrows=8でも約199 msが出ていたため再現性は未確定。いったん製品側をrows=8に戻し、同じ最終実装の再測定を `artifacts/metal-validation/benchmark-metal-recurrent-row8-repeat.json` に保存する。単独stageの小さな差だけでは採用しない。
+- rows=8再測定は **201.9345415 ms / 10,479 allocations / 529,120 bytes**、min/p95198.5/203.6 ms。rows=1との差は約1.3%で、測定分布は重なる。明確な改善とせず、製品側のrows=8を維持する。
+
+## recurrent decay の exp 再評価の削減候補
+
+- recurrent kernelはhead/tokenで同じ `exp(decay)` をvalue行/laneごとに評価していた。既存のdecay broadcastを `exp.(a_decay .* softplus.(...))` にし、head/tokenあたり一つのfactorを保存する候補を追加した。中間配列とbroadcast起動数は増やさず、recurrentはfactorを読む。
+- kernelには `Val{PRECOMPUTED}` を追加し、従来のlog-decayを受ける単体検証・段階別toolも引き続き使えるようにした。製品側は `Val(true)` でexpを省く。数値検証は `/private/tmp/jeff-decay-factor-validation.log`。割当・速度への効果はまだ未測定。
+- factor事前計算版は独立参照12ケース×3回に合格し、最大logit誤差 `3.361702e-5`。単体verifierはdecayを-12〜0へ広げ、従来のlog-decayと事前exp factorの両方をCPU recurrent参照と比較する。ログは `/private/tmp/jeff-decay-factor-primitives.log`。
+- factor事前計算と従来のlog-decayを含むプリミティブ検証はすべて通った。workspace有効・同条件20回の測定を `artifacts/metal-validation/benchmark-metal-decay-factor.json` に保存する。
+- factor事前計算版のfull forwardは **201.7068335 ms / 10,479 allocations / 529,120 bytes**。min/p95/max201.0/203.1/203.9 ms。直前rows=8の201.9345415 msとほぼ同じで、速度・割当改善は確認できない。事前expとkernel内expを同じ準備済み入力で比較するstageを追加し、`artifacts/metal-validation/benchmark-stages-decay-factor.json` に測定する。採用判断はまだ保留。
+- 単独stageは従来kernel内exp **5.1464585 ms**、事前factor **4.830125 ms**（各10回）。単体で約6.1%短いがfull forwardへ改善が出なかったため、製品側は従来のlog-decay経路へ戻した。`Val{PRECOMPUTED}` の比較経路と単体検証は診断用に残す。exp評価回数の削減だけでは推論全体の高速化を保証しない。
+
+## workspace の明示的な参照解放
+
+- extension内の `clear_forward_workspace!()` を追加した。現在taskのworkspaceがactiveなら拒否し、GPU同期後にtensor-data/値Vectorと配列の参照を外してtask-local entryを削除する。モデル重みや他taskのworkspaceは変更しない。配列の物理bufferを直接freeせず、既存DataRef/queue rootsとGCによる回収を使うため、呼び出し直後のresident memory減少は保証しない。
+- プリミティブverifierへ、forward途中で例外を起こしてactiveが解除されることと、明示clear後にslot/tensor-data/task-local参照が残らないことを追加した。ログは `/private/tmp/jeff-workspace-clear-primitives.log`。
+- 例外・clear・GC・再利用を含む追加検証と既存プリミティブ検証はすべて通った。
+
+## workspace の MPS feed 値 Vector 再利用候補
+
+- 出力slotごとに2要素のfeed値Vectorを保持する候補を追加した。各submissionでleft/rightのtensor-dataを設定し、GPU完了までqueue rootsに保持する。同一scope内で別の出力slotは別Vectorを使う。
+- scope終了時は完了済みfeedの2要素をそのslotが所有する出力tensor-dataへ置き換える。これによりVectorの記憶領域を再利用しながら、入力・モデル重みのnative bufferをworkspaceに残さない。slot交換・末尾削除・明示clearではfeed entryも削除する。入力bindingを書き換えるのはnormal readbackまたは例外時同期の後に限る。
+- 単体verifierへfeed Vectorのidentity、scope終了後のinput binding解除、長さ変更後の古いentry削除とclearを追加した。実モデル検証は `/private/tmp/jeff-feed-vector-validation.log`。効果は未測定。
+- feed Vector再利用候補の独立参照12ケース×3回は合格し、最大logit誤差 `3.361702e-5`。追加した単体検証は `/private/tmp/jeff-feed-vector-primitives.log` に実行する。
+- feed Vectorのidentity・完了後のinput binding解除・系列長変更・GC・clearと既存プリミティブ検証はすべて通った。同条件20回の性能測定を `artifacts/metal-validation/benchmark-metal-feed-vector.json` に保存する。
+- feed Vector再利用版は **10,081 allocations / 513,200 bytes / 中央値198.687604 ms**。直前result Vector再利用版10,479 / 529,120から398 allocations / 15,920 bytes減。199個の2要素feed VectorとそのMemoryの再利用による削減と一致する。min/p95/max197.6/199.7/200.0 ms。速度差は測定揺らぎの範囲で、追加の速度改善は確定しない。workspace配列393個・838,434,816 bytes、tensor-data199個・feed Vector199個を保持する。型診断は `/private/tmp/jeff-feed-vector-types.log`。
+- feed Vector再利用版もJET6対象はすべて報告なし。
+
+## packed Q/K 正規化の起動を一回にまとめる候補
+
+- `packed_qk_pair_kernel!` 内で従来のQ/K正規化を順に実行し、別々のquery/key出力へ保存する。平方和・SIMD reduction・epsilon・factor・除算の式を共有し、出力配列の数は変えず、GPU起動数を2→1へ減らす。`packed_qk` の単独経路も残す。
+- `packed_qk_pair` は2個のpooled配列を確保し、workspaceではそれぞれ別slotを再利用する。kernelがまとまってもquery/keyのbufferをaliasしない。
+- 実モデル検証は `/private/tmp/jeff-qk-pair-validation.log`。単体verifierにも幅7/128/256・長さ1/9/65のCPU参照比較を追加した。速度・割当の効果はまだ未測定。
+- Q/K一回起動版の独立参照12ケース×3回は合格し、最大logit誤差 `3.361702e-5`。追加の単体検証は `/private/tmp/jeff-qk-pair-primitives.log` に実行する。
+- Q/K一回起動版と既存プリミティブ検証はすべて通った。性能はまだ未測定で、feed Vector再利用版の10,081 allocations / 513,200 bytes / 198.687604 msをこの変更後の測定値として扱わない。
