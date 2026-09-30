@@ -1,7 +1,9 @@
-# Julia environments resolve independently; keep Project.toml files in Git.
+# Keep Julia projects in Git; omit generated workspace manifests.
 /Manifest.toml
 /test/Manifest.toml
 /tools/Manifest.toml
+/docs/Manifest.toml
+/docs/build/
 
 # Downloaded checkpoints and exported graphs/weights.
 /models/

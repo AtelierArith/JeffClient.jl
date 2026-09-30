@@ -1,0 +1,10 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
+
+[sources]
+JeffClient = {path = ".."}
+
+[compat]
+Documenter = "1"
+julia = "1.13"
