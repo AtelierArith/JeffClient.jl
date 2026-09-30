@@ -82,6 +82,8 @@ function main()
                 get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1"
             result["metal_trim_padding_enabled"] =
                 get(ENV, "JEFF_METAL_TRIM_PADDING", "0") == "1"
+            result["metal_fused_delta_mask_enabled"] =
+                get(ENV, "JEFF_METAL_FUSED_DELTA_MASK", "0") == "1"
             result["metal_shape_workspaces_enabled"] =
                 get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", "0") == "1"
             result["metal_computed_sequence_lengths"] = [

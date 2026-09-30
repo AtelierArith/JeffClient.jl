@@ -264,8 +264,20 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         metal_host_mask(mask),
         cfg,
     )
-    length = size(x, 2)
     masked = delta_masked_input(x, metal_device_mask(x, mask))
+    return delta_attention_masked(attention, masked, cfg)
+end
+
+JeffClient.native_delta_attention(
+    attention,
+    x::Metal.MtlMatrix{Float32},
+    mask,
+    cfg,
+    ::Val{true},
+) = delta_attention_masked(attention, x, cfg)
+
+function delta_attention_masked(attention, masked, cfg)
+    length = size(masked, 2)
     mixed = JeffClient.causal_depthwise(
         JeffClient.native_linear(attention.qkv, masked),
         attention.conv,

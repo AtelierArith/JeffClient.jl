@@ -334,11 +334,14 @@ function native_layer(layer, x, mask, cfg)
     return native_residual_add!(residual, mlp)
 end
 
-function native_layer_outputs(layer, x, normalized, mask, cfg)
+native_delta_attention(attention, x, mask, cfg, ::Val) =
+    delta_attention(attention, x, mask, cfg)
+
+function native_layer_outputs(layer, x, normalized, mask, cfg, premasked = Val(false))
     mixed =
         layer.attention.kind == :full ?
         full_attention(layer.attention, normalized, mask, cfg) :
-        delta_attention(layer.attention, normalized, mask, cfg)
+        native_delta_attention(layer.attention, normalized, mask, cfg, premasked)
     residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
     mlp = native_mlp(layer.mlp, normalized)
     # residual is owned by this layer; its normalization has already consumed

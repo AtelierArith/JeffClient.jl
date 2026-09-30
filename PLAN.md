@@ -199,6 +199,17 @@ independent 20-run repeat; residual addition reduced allocation further. Real-mo
 Next work: workspace lifetime and retention control,
 intermediate lifetimes, MPS feed containers, and true batch execution. Reduce
 remaining allocations and measure changes against independent references.
+
+For true Metal batch execution, the current row loop in `logits` must be replaced
+by a batch hook after input validation. Flatten tokens by sample for shared
+projection/MLP products, then keep sample boundaries explicit in convolution and
+DeltaNet recurrent state. Full attention needs `(head_dim, sequence, heads*batch)`
+layouts, per-sample RoPE positions and masks, and one final readout column per
+sample. Concatenating tokens into the existing attention methods would allow
+cross-sample convolution or attention and is incorrect. Report actual computed
+lengths when using a shared padded length; compare against both row-wise trimming
+and original PyTorch at the same precision. Verify duplicated/permuted samples,
+interior mask holes, GC, and workspace reuse before claiming batch speedups.
 Detailed findings
 belong in `memories/MEMORY.md`, principles in `AGENTS.md`, and repeated procedures
 in skills.

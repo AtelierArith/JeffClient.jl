@@ -375,6 +375,9 @@ metal_device_mask(reference, mask::PreparedMetalMask) = mask.device
 metal_host_mask(mask) = mask
 metal_host_mask(mask::PreparedMetalMask) = mask.host
 
+metal_mask_all_active(mask) = false
+metal_mask_all_active(mask::PreparedMetalMask) = all(==(1), mask.host)
+
 include("metal_delta.jl")
 include("metal_normalization.jl")
 include("metal_softmax.jl")

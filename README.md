@@ -409,6 +409,19 @@ Independent PyTorch references pass for 15 cases, including interior mask holes;
 shape-workspace ownership checks pass. Its six inspected JET targets report no
 errors, and allocation profiling records no new MPS tensor-data wrappers.
 
+`JEFF_METAL_FUSED_DELTA_MASK=1` is another experiment, disabled by default. It
+applies DeltaNet's input mask while writing the RMS result, removing a separate
+kernel and intermediate array. All-one prepared masks skip multiplication.
+Full attention and residual values keep their existing mask behavior.
+With trimming and shape workspaces enabled, B2/L512 measured 7,480 allocations /
+424,544 host bytes versus 7,866 / 435,552 without fusion. Retained workspace
+buffers decrease by 56,623,104 bytes to 2,567,372,800 bytes. Medians around
+580–594 ms overlap the non-fused control; this is an allocation and buffer
+retention improvement, without a confirmed latency improvement. Independent
+15-case references, mask-switching slot identity/GC checks, and the six JET
+targets pass. Allocation profiling records 376 rather than 412 KernelState
+objects for B2, consistent with removing 36 launches.
+
 The latest type check reports no JET errors for the six inspected JeffClient
 and Metal-extension targets; normalization's Bool dispatch is explicitly split.
 

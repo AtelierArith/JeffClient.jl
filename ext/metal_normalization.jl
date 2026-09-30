@@ -1,5 +1,41 @@
 # One logical 32-lane SIMD group normalizes a column. Fixed-size tuples keep
 # inputs in registers through the reduction and output, without scratch arrays.
+struct MaskedNormalizationOutput{A,M}
+    array::A
+    mask::M
+end
+
+function Metal.Adapt.adapt_structure(to, output::MaskedNormalizationOutput)
+    return MaskedNormalizationOutput(
+        Metal.Adapt.adapt(to, output.array),
+        Metal.Adapt.adapt(to, output.mask),
+    )
+end
+
+@inline function store_normalization!(output, value, index, column)
+    @inbounds output[index] = value
+    return nothing
+end
+
+@inline function store_normalization!(
+    output::MaskedNormalizationOutput,
+    value,
+    index,
+    column,
+)
+    @inbounds output.array[index] = value * output.mask[column]
+    return nothing
+end
+
+normalization_destination(output, ::Nothing) = output
+function normalization_destination(output, mask)
+    width = size(output, 1)
+    width > 0 || throw(ArgumentError("Masked normalization width must be positive."))
+    length(mask) == length(output) ÷ width ||
+        throw(DimensionMismatch("Normalization mask length must match columns."))
+    return MaskedNormalizationOutput(output, mask)
+end
+
 struct NormalizationConfig{PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}
     eps::Float32
     factor::Float32
@@ -76,7 +112,7 @@ function normalization_kernel!(
                 if GATED
                     normalized *= JeffClient.native_silu(gate[offset+row])
                 end
-                output[offset+row] = normalized
+                store_normalization!(output, normalized, offset + row, column)
             end
         end
     end
@@ -231,10 +267,19 @@ function launch_normalization!(
     return nothing
 end
 
-function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
+function fused_normalization(
+    x,
+    weight,
+    eps,
+    factor,
+    mean,
+    centered,
+    weighted;
+    mask = nothing,
+)
     output = pooled_array(Float32, size(x))
     launch_normalization!(
-        output,
+        normalization_destination(output, mask),
         x,
         nothing,
         nothing,
@@ -321,13 +366,13 @@ end
 
 # The previous layer's MLP has already consumed its normalized residual.
 # Read and update each residual element on the same queue while normalizing it.
-function residual_input_rms!(residual, mixed, weight, eps)
+function residual_input_rms!(residual, mixed, weight, eps, mask = nothing)
     size(residual) == size(mixed) || throw(DimensionMismatch("Residual shapes must match."))
     length(weight) == size(residual, 1) ||
         throw(DimensionMismatch("RMS weight width must match."))
     output = pooled_array(Float32, size(residual))
     launch_normalization!(
-        output,
+        normalization_destination(output, mask),
         residual,
         mixed,
         residual,
@@ -362,14 +407,55 @@ function JeffClient.native_hidden_forward(
     )
     isempty(layers) && return JeffClient.native_rms(hidden[:, end:end], final_norm, cfg.eps)
     first_layer = first(layers)
-    normalized = JeffClient.native_rms(hidden, first_layer.input_norm, cfg.eps)
-    residual, mlp =
-        JeffClient.native_layer_outputs(first_layer, hidden, normalized, mask, cfg)
+    fuse_mask = get(ENV, "JEFF_METAL_FUSED_DELTA_MASK", "0") == "1" && cfg.key_dim <= 256
+    # All-one masks need no multiplication. Both paths still allocate the same
+    # normalization output and skip the separate delta mask slot.
+    device_mask =
+        fuse_mask && !metal_mask_all_active(mask) ? metal_device_mask(hidden, mask) :
+        nothing
+    if fuse_mask && first_layer.attention.kind == :delta
+        normalized = fused_normalization(
+            hidden,
+            first_layer.input_norm,
+            cfg.eps,
+            1.0f0,
+            Val(true),
+            Val(true),
+            Val(true);
+            mask = device_mask,
+        )
+        residual, mlp = JeffClient.native_layer_outputs(
+            first_layer,
+            hidden,
+            normalized,
+            mask,
+            cfg,
+            Val(true),
+        )
+    else
+        normalized = JeffClient.native_rms(hidden, first_layer.input_norm, cfg.eps)
+        residual, mlp =
+            JeffClient.native_layer_outputs(first_layer, hidden, normalized, mask, cfg)
+    end
     for index = 2:length(layers)
         layer = layers[index]
-        hidden, normalized = residual_input_rms!(residual, mlp, layer.input_norm, cfg.eps)
-        residual, mlp =
-            JeffClient.native_layer_outputs(layer, hidden, normalized, mask, cfg)
+        if fuse_mask && layer.attention.kind == :delta
+            hidden, normalized =
+                residual_input_rms!(residual, mlp, layer.input_norm, cfg.eps, device_mask)
+            residual, mlp = JeffClient.native_layer_outputs(
+                layer,
+                hidden,
+                normalized,
+                mask,
+                cfg,
+                Val(true),
+            )
+        else
+            hidden, normalized =
+                residual_input_rms!(residual, mlp, layer.input_norm, cfg.eps)
+            residual, mlp =
+                JeffClient.native_layer_outputs(layer, hidden, normalized, mask, cfg)
+        end
     end
     # The last layer needs only the readout column, not a full residual sum.
     last_column = size(residual, 2)

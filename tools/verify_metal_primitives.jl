@@ -20,6 +20,56 @@ function captured_kernel_handle_probe(value)
     end
 end
 
+function verify_fused_delta_mask_workspace(extension)
+    flags = (
+        "JEFF_METAL_WORKSPACE",
+        "JEFF_METAL_SHAPE_WORKSPACES",
+        "JEFF_METAL_TRIM_PADDING",
+        "JEFF_METAL_FUSED_DELTA_MASK",
+    )
+    previous = Dict(flag => get(ENV, flag, nothing) for flag in flags)
+    try
+        extension.clear_forward_workspace!()
+        ENV["JEFF_METAL_WORKSPACE"] = "1"
+        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "0"
+        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
+        ENV["JEFF_METAL_FUSED_DELTA_MASK"] = "1"
+        fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
+        cpu = NativeBackend(fixture; device = :cpu)
+        gpu = NativeBackend(fixture; device = :metal)
+        ids = reshape(mod.(collect(Int64, 0:8), size(gpu.embedding, 2)), 1, 9)
+        previous_slots = nothing
+        for mask in (
+            ones(Int64, 1, 9),
+            reshape(Int64[1, 0, 1, 0, 1, 0, 1, 0, 1], 1, 9),
+            ones(Int64, 1, 9),
+            reshape(Int64[0, 0, 1, 1, 0, 1, 0, 1, 1], 1, 9),
+        )
+            inputs = Dict("input_ids" => ids, "attention_mask" => mask)
+            expected = logits(cpu, inputs)
+            actual = logits(gpu, inputs)
+            isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
+                error("Fused delta mask workspace scores mismatch.")
+            workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            if previous_slots !== nothing
+                length(previous_slots) == length(workspace.slots) &&
+                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                    error("Mask values changed fused workspace slot identities.")
+            end
+            previous_slots = copy(workspace.slots)
+            GC.gc(true)
+        end
+    finally
+        extension.clear_forward_workspace!()
+        for flag in flags
+            previous[flag] === nothing ? delete!(ENV, flag) : (ENV[flag] = previous[flag])
+        end
+    end
+    println(
+        "Validated fused delta workspace slots across all-active/interior/prefix masks and GC.",
+    )
+end
+
 function verify_weight_tensor_owner(extension)
     host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
     weight = Metal.MtlArray(host_weight)
@@ -597,6 +647,43 @@ function main()
         )
         expected = JeffClient.native_rms(host, weight, 1.0f-6; centered)
         isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) || error("RMS mismatch.")
+        mask = Float32[0, 1, 0, 1, 1, 1]
+        gpu_mask = Metal.MtlArray(mask)
+        masked = extension.fused_normalization(
+            Metal.MtlArray(host),
+            Metal.MtlArray(weight),
+            1.0f-6,
+            1.0f0,
+            Val(true),
+            centered ? Val(true) : Val(false),
+            Val(true);
+            mask = gpu_mask,
+        )
+        masked_expected = reshape(expected, width, 6) .* permutedims(mask)
+        isapprox(
+            reshape(Array(masked), width, 6),
+            masked_expected;
+            atol = 2.0f-5,
+            rtol = 2.0f-5,
+        ) || error("Masked RMS mismatch.")
+        if centered
+            matrix = reshape(host, width, 6)
+            added = matrix .* 0.1f0
+            residual, normalized = extension.residual_input_rms!(
+                Metal.MtlArray(matrix),
+                Metal.MtlArray(added),
+                Metal.MtlArray(weight),
+                1.0f-6,
+                gpu_mask,
+            )
+            sum_expected = matrix .+ added
+            norm_expected =
+                JeffClient.native_rms(sum_expected, weight, 1.0f-6) .* permutedims(mask)
+            isapprox(Array(residual), sum_expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+                error("Masked normalization modified the residual mask.")
+            isapprox(Array(normalized), norm_expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+                error("Masked residual RMS mismatch.")
+        end
         GC.gc(true)
     end
     println("Validated RMS normalization widths and centered/noncentered weights.")
@@ -797,6 +884,7 @@ function main()
         GC.gc(true)
     end
     println("Validated packed Q/K normalization and direct V recurrent reads.")
+    verify_fused_delta_mask_workspace(extension)
 end
 
 main()
