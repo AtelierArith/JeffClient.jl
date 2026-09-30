@@ -138,3 +138,54 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 通常 RMS/L2 の起動では residual 用の二つのダミー MtlArray 引数を `nothing` に変更した。`Val(false)` で該当分岐は除かれるため配列の引数変換・保持は不要。変更後の効果は別計測で確認する。
 - 不要な引数を除いた 20 回計測は **21,943 allocations / 1,027,552 bytes / 中央値 214.029875 ms**。割当数は変わらず、heap bytes は 11,376 bytes 減った。min/p95/max は 212.8/224.9/356.7 ms、private free pool は同じ 1,749,647,360 bytes。記録は `artifacts/metal-validation/benchmark-metal-rms-args.json`。この引数変更による速度改善は確認できない。
 - 最終状態でも実モデル 12 ケース × 3 回が通り、最大 logit 誤差は `3.361702e-5`。既存の MPS/RMS/RoPE プリミティブ検証も通った。実モデル検証ログは `/private/tmp/jeff-rms-args-validation.log`、プリミティブは `/private/tmp/jeff-norm-unused-primitives.log`。
+
+## DeltaNet decay の配列単項マイナス
+
+- `-exp.(attention.a_log)` は dot のない配列単項マイナスが broadcast 融合を切る。`-1.0f0 .* exp.(attention.a_log) .* native_softplus.(...)` へ変更して符号反転・exp・softplus・乗算を一つの broadcast にした。
+- 独立参照 12 ケース × 3 回は通り、最大 logit 誤差 `3.361702e-5`。同条件 20 回で **20,489 allocations / 974,768 bytes / 中央値 217.053292 ms**。直前の 21,943 / 1,027,552 に比べ割当数約 6.6%、bytes 約 5.1% 減。min/p95/max は 215.4/224.5/369.5 ms。private free pool は同じ 1,749,647,360 bytes。
+- 直前中央値 214.029875 ms から速度改善は確認できない。融合した broadcast では固定の `exp(a_log)` も列ごとに再評価される。固定係数の事前計算・保存を次に検討する。記録は `artifacts/metal-validation/benchmark-metal-decay.json`、検証ログは `/private/tmp/jeff-decay-validation.log`。
+
+## 固定 decay 係数の事前計算
+
+- モデル読み込み時に各 backend 上で `-1.0f0 .* exp.(A_log)` を一回計算し、attention の `a_decay` に保持する。CPU と Metal はそれぞれの Float32 exp を使い、推論中には係数の再計算を行わない。読み込み後の推論重みは固定として扱う。
+- CPU fixture の 5 入力で最大誤差 `3.874302e-7`、Metal 実モデル 12 ケース × 3 回で最大誤差 `3.361702e-5`。どちらも独立参照と一致した。Metal 検証ログは `/private/tmp/jeff-decay-cache-validation.log`。
+- 同条件の 20 回計測は **20,489 allocations / 972,176 bytes / 中央値 216.182792 ms**。直前と割当数は同じで bytes は 2,592 減った。min/p95/max は 215.0/223.7/350.2 ms、pool free bytes は同じ 1,749,647,360。中央値 217.053292 → 216.182792 ms の差を速度改善の確証とはしない。記録は `artifacts/metal-validation/benchmark-metal-decay-cache.json`。
+
+## attention mask の GPU 転送の共有
+
+- `native_prepare_mask` と `PreparedMetalMask` を追加した。各入力行で Float32 mask を一度だけアップロードし、全 attention 層で同じ device vector を使う。元の host mask も保持し、未対応幅で汎用 attention へ戻るときは host mask を渡す。単独の attention 呼び出しで host mask を渡す従来経路も使える。
+- 独立参照 12 ケース × 3 回（GC と padding を含む）は通り、最大 logit 誤差は `3.361702e-5`。ログは `/private/tmp/jeff-mask-reuse-validation.log`。
+- 同条件 20 回で **20,318 allocations / 942,416 bytes / 中央値 213.3363335 ms**。min/p95/max は 211.9/220.4/348.4 ms。直前の 20,489 / 972,176 から割当数 171、bytes 29,760 減。private free pool は同じ 1,749,647,360 bytes。
+- trial 全体の shared upload misses/reuses は **152/425 → 14/34**。これは一推論当たりの値ではなく、ロード・warmup・BenchmarkTools の試行を含む累計。繰り返し転送の削減は確認できたが、216.2 → 213.3 ms の差の再現性は追加計測が必要。記録は `artifacts/metal-validation/benchmark-metal-mask-reuse.json`。
+- 再プロファイルの JET 6 対象は報告なし。Profile.Allocs 10% は 2,374 サンプルで、pool 生成 3 箇所計 586、通常 RMS launch 250、tensor dictionary 173、Q/K/V slice 3 箇所計 352。decay 式は前回 234 → 72 サンプルに減った。サンプル比率は時間比率ではなく、抽出の揺らぎもある。次は packed QKV の切り出しと L2 正規化の融合を検討する。ログは `/private/tmp/jeff-mask-reuse-profile.log`。
+
+## packed QKV からの Q/K 読み取りと L2 正規化
+
+- `packed_qk_kernel!` は convolution 出力の (packed channels, tokens) を直接読み、head ごとの平方和を SIMD reduction で求めて正規化済み Q/K を出力する。Q/K の slice コピーと reshape を除いた。平方和、epsilon、sqrt、factor、除算の順序は従来の L2 kernel と同じ。V の slice はまだ残る。
+- 実モデル 12 ケース × 3 回は通り、最大 logit 誤差 `3.361702e-5`。検証ログは `/private/tmp/jeff-packed-qk-validation.log`。
+- 同条件 20 回で **18,092 allocations / 824,464 bytes / 中央値 203.837229 ms**。直前の 20,318 / 942,416 から約 11.0% / 12.5% 減。min/p95/max は 202.2/211.5/336.6 ms。中央値 213.3363335 → 203.837229 ms の再現性は確認が必要。記録は `artifacts/metal-validation/benchmark-metal-packed-qk.json`。
+- 一方 private free pool は **6,376,996,864 bytes** を記録した。最終スナップショットは GC/試行の回収タイミングに依存するが、保持量の増加を見落とさない。ピークメモリを直接測っていないため、メモリ全体の改善はまだ主張できない。次は同期・GC 後の比較と pool の保持制御を検討する。
+- ベンチマークに `metal_pool_after_gc` を追加し、trial の計測外で full GC・GPU 同期・upload 回収後の統計も残すようにした。再計測は **203.94675 ms / 18,092 allocations / 824,464 bytes**。pool は直後 **6,376,996,864**、GC 後 **6,478,266,368 bytes**。GC 後にも同程度の保持が残り、単なる回収前のスナップショット差だけでは説明できない。記録は `artifacts/metal-validation/benchmark-metal-packed-qk-gc.json`。
+- 現在の private pool は allocation miss のときだけ上限超過を見て全消去する。既存サイズで reuse が続く場合、保持量を縮小する機会がない。`limit_bytes` も統計へ追加した。GPU 完了後の縮小と、forward 内の必要数を限定する設計を検討する。
+- M4 の recommended working set は **19,069,665,280 bytes**、従来の pool 上限はその 1/4 の **4,767,416,320 bytes**。GC 後の保持量はこの上限を超えていた。
+- `trim_completed_buffer_pool!` を追加し、`native_host` の `Array(input)` が GPU 完了を待った後、free pool の上限を超えるバッファを大きいサイズから解放する。通常は bytes 比較だけ行い、上限以下なら終了する。GPU 完了前には呼ばない。上限は live buffer と peak/resident memory の上限ではない。
+- この縮小を加えた実モデル 12 ケース × 3 回は通り、最大 logit 誤差は `3.361702e-5`。ログは `/private/tmp/jeff-pool-trim-validation.log`。縮小後の保持量と速度は次に計測する。
+- 縮小後の 20 回計測は **205.7833125 ms / 18,093 allocations / 824,496 bytes**。trial 直後の pool は **2,669,461,504**、GC 後は **5,547,130,880 bytes**。直前の GC 後 6,478,266,368 から減ったが、GC で遅れて返る配列は次の完了時縮小まで上限を超え得る。厳密な常時メモリ上限を実装したわけではない。記録は `artifacts/metal-validation/benchmark-metal-pool-trim.json`。
+- ベンチマークには GC 後の明示的縮小を行った第三の `metal_pool_after_trim` も追加した。これらの統計処理はすべて latency/heap trial の外で行う。post-GC と post-trim を混同せず、遅延返却の影響と cache 制御の効果を分けて判断する。
+- 第三の統計を含む再計測では trial/GC/trim 後がそれぞれ **2,669,461,504 / 5,547,130,880 / 4,766,990,336 bytes**。明示的縮小後に上限 **4,767,416,320 bytes** 以下になることを確認した。中央値 **208.4717085 ms**、**18,093 allocations / 824,496 bytes**。JET 6 対象も報告なし。記録は `artifacts/metal-validation/benchmark-metal-pool-trim-gc.json`、型診断は `/private/tmp/jeff-packed-qk-trim-types.log`。
+
+## DeltaNet の packed V の直接読み取り
+
+- recurrent kernel に V の開始行を渡し、convolution 出力から `start + (head-1)*value_dim + row` の行を直接読む形にした。V の slice コピーと reshape が不要になった。Q/K/V 切り出し用のコピー配列はすべて除去したが、正規化済み Q/K と recurrent 出力の配列は残る。
+- 実モデル 12 ケース × 3 回は通り、最大 logit 誤差 `3.361702e-5`。ログは `/private/tmp/jeff-packed-v-validation.log`。
+- 同条件 20 回は **17,012 allocations / 763,040 bytes / 中央値 200.6846455 ms**。直前の pool 縮小版 18,093 / 824,496 から約 6.0% / 7.5% 減。min/p95/max は 198.4/268.6/347.9 ms で tail の改善は確認できない。記録は `artifacts/metal-validation/benchmark-metal-packed-v.json`。
+- pool の trial/GC/trim 後は **4,064,804,864 / 5,058,494,464 / 4,766,990,336 bytes**。縮小後は上限内に収まるが、GC 後まで常時上限を守る実装ではない。
+- プリミティブ検証に幅 7/128/256 と系列長 1/9/65 の 9 組合せを追加した。packed Q/K を CPU L2 参照、V 直接読み取りを CPU の行列形式 recurrent 更新と比較し、全組合せが通った。head 比率 2、value 幅 3/7/9、ゼロ入力列、GC を含む。ログは `/private/tmp/jeff-packed-qkv-primitives.log`。
+- V の直接読み取りを含む最終コードでも JET 6 対象はすべて報告なし。ログは `/private/tmp/jeff-packed-v-types.log`。
+
+## batch 2・長さ 512 の original Python 比較
+
+- 拡張参照 case 12（active tokens 512/256）、M4、Float32、同期・readout・CPU score return 込みで双方 20 回を順に計測。Julia は batch 行を順次処理、original Python は元の forward の batch 処理を使う。
+- Julia Metal 中央値 **806.1352295 ms**、original Python MPS F32 **1338.6191045 ms**。この条件では Julia の中央値が約 39.8% 短い。original Python は FLA/causal-conv1d がなく PyTorch 参照実装を使う条件の比較であり、他の実装や入力へ一般化しない。
+- Julia は **34,546 allocations / 1,545,760 bytes**、min/p95/max **780.5/988.8/1001.7 ms**。Python は **1294.4/1344.2/1422.5 ms**。数値誤差も参照許容範囲内（Python 最大 `1.7881393e-5`）。Julia pool は GC 後 **4,911,136,768**、縮小後 **4,763,287,552 bytes**。
+- 記録は `artifacts/metal-validation/benchmark-metal-b2-l512.json` と `benchmark-python-b2-l512.json`。長い系列でも改善を確認したが、Julia の実 batch 化と tail latency には改良の余地がある。

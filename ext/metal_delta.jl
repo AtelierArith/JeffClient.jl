@@ -18,6 +18,7 @@ function delta_recurrent_kernel!(
     decay,
     key_dim,
     value_dim,
+    value_start,
     groups,
     length,
     ::Val{KEY_VALUES},
@@ -43,7 +44,9 @@ function delta_recurrent_kernel!(
         factor = exp(decay[head, token])
         state = map(s -> s * factor, state)
         prediction = warp_sum(sum(map(*, state, keys)))
-        v = row <= value_dim ? value[row, head, token] : 0.0f0
+        v =
+            row <= value_dim ? value[value_start+(head-Int32(1))*value_dim+row, token] :
+            0.0f0
         correction = (v - prediction) * beta[head, token]
         state = map((s, k) -> s + correction * k, state, keys)
         result = warp_sum(sum(map(*, state, queries)))
@@ -54,6 +57,62 @@ function delta_recurrent_kernel!(
     return
 end
 
+function packed_qk_kernel!(
+    output,
+    mixed,
+    width,
+    heads,
+    channels,
+    columns,
+    start,
+    factor,
+    ::Val{PARTS},
+) where {PARTS}
+    local_index = Metal.thread_position_in_threadgroup_2d()
+    group = Metal.threadgroup_position_in_grid_2d().x
+    lane = Int32(local_index.x)
+    column = (Int32(group) - Int32(1)) * Int32(8) + Int32(local_index.y)
+    if column <= columns
+        head = mod(column - Int32(1), heads)
+        token = (column - Int32(1)) ÷ heads
+        source = token * channels + start + head * width
+        destination = (column - Int32(1)) * width
+        values = ntuple(Val(PARTS)) do part
+            row = lane + Int32(32 * (part - 1))
+            row <= width ? (@inbounds mixed[source+row]) : 0.0f0
+        end
+        squared = 0.0f0
+        @inbounds for part = 1:PARTS
+            squared += abs2(values[part])
+        end
+        denominator = sqrt(warp_sum(squared) + 1.0f-6) * factor
+        @inbounds for part = 1:PARTS
+            row = lane + Int32(32 * (part - 1))
+            if row <= width
+                output[destination+row] = values[part] / denominator
+            end
+        end
+    end
+    return
+end
+
+function packed_qk(mixed, cfg, length, start, factor)
+    output = pooled_array(Float32, (cfg.key_dim, cfg.key_heads, length))
+    columns = cfg.key_heads * length
+    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) packed_qk_kernel!(
+        output,
+        mixed,
+        Int32(cfg.key_dim),
+        Int32(cfg.key_heads),
+        Int32(size(mixed, 1)),
+        Int32(columns),
+        Int32(start),
+        factor,
+        Val(cld(cfg.key_dim, 32)),
+    )
+    return output
+end
+
 function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask, cfg)
     # Keep the stable chunked implementation available for unsupported widths.
     cfg.key_dim > 256 && return invoke(
@@ -61,24 +120,21 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         Tuple{Any,Any,Any,Any},
         attention,
         x,
-        mask,
+        metal_host_mask(mask),
         cfg,
     )
     length = size(x, 2)
-    masked = x .* JeffClient.on_native_device(x, reshape(Float32.(mask), 1, :))
+    masked = x .* reshape(metal_device_mask(x, mask), 1, :)
     mixed = JeffClient.causal_depthwise(
         JeffClient.native_linear(attention.qkv, masked),
         attention.conv,
     )
     key_width = cfg.key_dim * cfg.key_heads
-    query = reshape(mixed[1:key_width, :], cfg.key_dim, cfg.key_heads, length)
-    key = reshape(mixed[(key_width+1):2key_width, :], cfg.key_dim, cfg.key_heads, length)
-    value = reshape(mixed[(2key_width+1):end, :], cfg.value_dim, cfg.value_heads, length)
-    query = l2_normalize(query, sqrt(Float32(cfg.key_dim)))
-    key = l2_normalize(key, 1.0f0)
+    query = packed_qk(mixed, cfg, length, 0, sqrt(Float32(cfg.key_dim)))
+    key = packed_qk(mixed, cfg, length, key_width, 1.0f0)
     beta = JeffClient.native_sigmoid.(JeffClient.native_linear(attention.b, masked))
     decay =
-        -exp.(attention.a_log) .* JeffClient.native_softplus.(
+        attention.a_decay .* JeffClient.native_softplus.(
             JeffClient.native_linear(attention.a, masked) .+ attention.dt_bias,
         )
     z = reshape(
@@ -94,11 +150,12 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         output,
         query,
         key,
-        value,
+        mixed,
         beta,
         decay,
         Int32(cfg.key_dim),
         Int32(cfg.value_dim),
+        Int32(2key_width),
         Int32(cfg.value_heads ÷ cfg.key_heads),
         Int32(length),
         Val(key_values),

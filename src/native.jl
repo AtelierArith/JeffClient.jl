@@ -117,7 +117,9 @@ function NativeBackend(checkpoint::AbstractString; device::Symbol = :cpu)
                 a = get("linear_attn.in_proj_a.weight"),
                 b = get("linear_attn.in_proj_b.weight"),
                 conv = dropdims(get("linear_attn.conv1d.weight"); dims = 2),
-                a_log = get("linear_attn.A_log"),
+                # Fixed inference weights: compute the decay multiplier once
+                # on this backend, preserving its Float32 exp implementation.
+                a_decay = -1.0f0 .* exp.(get("linear_attn.A_log")),
                 dt_bias = get("linear_attn.dt_bias"),
                 norm = get("linear_attn.norm.weight"),
                 out = get("linear_attn.out_proj.weight"),
@@ -253,7 +255,7 @@ function delta_attention(attention, x, mask, cfg)
     z = reshape(native_linear(attention.z, masked), cfg.value_dim, cfg.value_heads, length)
     beta = native_sigmoid.(native_linear(attention.b, masked))
     decay =
-        -exp.(attention.a_log) .*
+        attention.a_decay .*
         native_softplus.(native_linear(attention.a, masked) .+ attention.dt_bias)
     out = similar(x, cfg.value_dim * cfg.value_heads, length)
     groups = cfg.value_heads ÷ cfg.key_heads
@@ -311,6 +313,7 @@ native_residual_rms(x, mixed, weight, eps) = begin
 end
 
 native_mlp_gate(gate, up) = native_silu.(gate) .* up
+native_prepare_mask(reference, mask) = mask
 
 function native_layer(layer, x, mask, cfg)
     normalized = native_rms(x, layer.input_norm, cfg.eps)
@@ -350,7 +353,7 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
     result = Matrix{Float32}(undef, size(ids, 1), size(backend.readout, 2))
     for row in axes(ids, 1)
         hidden = native_gather(backend.embedding, vec(ids[row, :]))
-        row_mask = vec(mask[row, :])
+        row_mask = native_prepare_mask(hidden, vec(mask[row, :]))
         for layer in backend.layers
             hidden = native_layer(layer, hidden, row_mask, backend.config)
         end

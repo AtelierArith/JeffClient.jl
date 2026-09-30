@@ -184,27 +184,27 @@ scores to CPU are included. GPU measurements wait for completion.
 | Backend | Weight precision | Samples | Median per forward |
 | --- | --- | ---: | ---: |
 | Native Julia CPU (8 BLAS threads) | Float32 | 10 | 1.834 s |
-| Native Julia Metal (fused kernels) | Float32 | 20 | 0.214 s |
+| Native Julia Metal (fused kernels) | Float32 | 20 | 0.201 s |
 | Original Jeff / PyTorch CPU (8 threads) | Float32 | 10 | 2.988 s |
 | Original Jeff / PyTorch MPS | BF16 (original default) | 10 | 0.333 s |
 | Original Jeff / PyTorch MPS | Float32 | 20 | 0.350 s |
 
-For this prepared batch-1 case, Julia Metal takes about **38% less time than
-PyTorch MPS at the same Float32 precision** (~1.60× throughput). This comparison
+For this prepared batch-1 case, Julia Metal takes about **43% less time than
+PyTorch MPS at the same Float32 precision** (~1.74× throughput). This comparison
 does not establish performance for other lengths or batch sizes.
 The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 1.62 s and its first forward took 13.01 s
+Julia Metal's model loading took 2.50 s and its first forward took 12.20 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 21,943 Julia heap allocations / 1.03 MB per
+BenchmarkTools measured 17,012 Julia heap allocations / 0.76 MB per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
-fell from 2.492 s to 0.214 s (~11.6× faster). Allocation counts fell from 2,845,912
-to 21,943 (~99.2%), and Julia heap bytes from 145,768,352 to 1,027,552 (~99.3%). Device-only buffers
+fell from 2.492 s to 0.201 s (~12.4× faster). Allocation counts fell from 2,845,912
+to 17,012 (~99.4%), and Julia heap bytes from 145,768,352 to 763,040 (~99.5%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -222,15 +222,24 @@ this step improved host allocation without an observed speed gain.
 
 Mask reuse, last-column final RMS, residual/RMS fusion, and MLP SiLU/up fusion
 then reduced allocations to 21,943 / 1.03 MB after removing unused RMS arguments.
-The latest median was 214 ms;
-small timing differences require repeat measurements.
+Cached decay coefficients and a shared per-row device mask then reduced
+allocations to 20,318 / 0.94 MB. Reading packed Q/K directly while normalizing,
+and reading packed V in the recurrent kernel, reduced this to 17,012 / 0.76 MB.
+The latest median/minimum/p95/maximum were 201/198/269/348 ms; tail latency
+remains variable.
 
-The trial recorded 7,072 private-buffer reuses and 425 shared-upload reuses.
-It retained about 1.75 GB of free device buffers afterward: reducing allocation
-uses a cache and does not imply lower total resident memory. Private free caches
-are trimmed on allocation pressure at one quarter of the recommended working
-set per queue; retained shared uploads are limited to 64 MB per queue. The pool
-size depends on GC and prior calls; it is not a measurement of peak GPU memory.
+The latest trial retained 4.06 GB of free private buffers immediately afterward,
+5.06 GB after full GC, and 4.77 GB after explicit trimming. The queue's cache
+limit is one quarter of the recommended working set. It is checked on allocation
+pressure and after completed score downloads. Delayed GC returns can exceed it
+until the next completed trim. These are free cache snapshots, not peak or total
+resident GPU memory. Shared uploads remain limited to 64 MB per queue.
+
+A second matched Float32 comparison used batch 2 / length 512 with 512 and 256
+active tokens per row: Julia Metal measured **806 ms**, original Python MPS
+**1,339 ms** (20 samples each). Julia currently processes batch rows sequentially.
+This result supports that specific longer input; other shapes and optimized
+Python kernels still need separate measurements.
 
 ```bash
 julia --project=tools tools/benchmark_inference.jl CHECKPOINT_DIRECTORY metal artifacts/jeff-0.8b-onnx/reference.json 1 20 artifacts/metal-validation/benchmark-metal.json

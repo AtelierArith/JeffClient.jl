@@ -39,6 +39,35 @@ function clear_buffer_pool!()
     return nothing
 end
 
+# Call only after completing this queue's GPU work. A miss-only pressure check
+# can leave an oversized pool intact indefinitely when all sizes are reused.
+function trim_completed_buffer_pool!()
+    queue = objectid(Metal.global_queue(Metal.device()))
+    buffers = @lock BUFFER_POOL_LOCK begin
+        bytes = get(BUFFER_POOL_BYTES, queue, 0)
+        limit = get(BUFFER_POOL_LIMITS, queue, typemax(Int))
+        bytes <= limit && return nothing
+        retired = Metal.MTLBuffer[]
+        keys_by_size = sort(
+            [key for key in keys(BUFFER_POOL) if key[1] == queue];
+            by = last,
+            rev = true,
+        )
+        for key in keys_by_size
+            free = BUFFER_POOL[key]
+            while bytes > limit && !isempty(free)
+                push!(retired, pop!(free))
+                bytes -= key[3]
+            end
+            bytes <= limit && break
+        end
+        BUFFER_POOL_BYTES[queue] = bytes
+        retired
+    end
+    foreach(Metal.free, buffers)
+    return nothing
+end
+
 function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
     queue = objectid(Metal.global_queue(Metal.device()))
     bytes = cld(max(prod(dims) * sizeof(T), 1), BUFFER_PAGE) * BUFFER_PAGE
@@ -72,6 +101,7 @@ function metal_pool_stats()
         misses = BUFFER_MISSES[],
         reuses = BUFFER_REUSES[],
         free_bytes = get(BUFFER_POOL_BYTES, queue, 0),
+        limit_bytes = get(BUFFER_POOL_LIMITS, queue, 0),
         free_buckets = sort(
             [
                 (
@@ -182,5 +212,6 @@ end
 function JeffClient.native_host(input::Metal.MtlArray)
     host = Array(input) # This waits for the current queue's GPU work.
     recycle_uploads!()
+    trim_completed_buffer_pool!()
     return host
 end

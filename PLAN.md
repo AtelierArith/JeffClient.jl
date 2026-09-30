@@ -148,9 +148,9 @@ extension methods at that stage.
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.214 s**, original Python MPS
-**0.350 s**. Julia heap: **21,943 allocations / 1,027,552 bytes**. This is ~11.6×
-faster than the 2.492 s implementation, with ~99.2% fewer allocations. Loading
+20 warmed synchronized calls: Julia Metal **0.201 s**, original Python MPS
+**0.350 s**. Julia heap: **17,012 allocations / 763,040 bytes**. This is ~12.4×
+faster than the 2.492 s implementation, with ~99.4% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
 GC between cases and disabled scalar indexing. The tiny fixture and primitive
@@ -160,13 +160,16 @@ clean. Direct feed construction reduced allocations by another 15.4% while
 median latency remained unchanged. RMS launches and residual/MLP sites account
 for about 28% of the latest 10% allocation sample; buffer wrappers also remain.
 
-The benchmark retained ~1.75 GB of private pooled buffers; this is not peak GPU
-memory. The timing range is broad, so tail-latency improvement is not established.
-Residual/RMS and MLP SiLU/up fusion are implemented and reference-verified.
-Next work: repeat timing and inspect pool size/counts;
-explicit intermediate release for reuse within a forward; reusable workspaces
-and MPS feed descriptors. Reduce remaining heap allocations and measure each
-change while preserving independent-reference agreement. Detailed findings
+Packed Q/K normalization and direct V recurrent reads remove the three QKV
+slice copies. Primitive checks cover widths 7/128/256 and lengths 1/9/65.
+Matched batch 2 / length 512 / F32 medians are Julia 806 ms and Python 1,339 ms.
+Private cache snapshots after trial/GC/trim are 4.06/5.06/4.77 GB; this is not
+peak GPU memory. Completed downloads now trim oversized free caches, while
+late GC returns may exceed the limit until the next trim.
+Next work: fuse DeltaNet output RMS and SiLU gating; reusable workspaces,
+intermediate lifetimes, MPS descriptors, and true batch execution. Reduce
+remaining allocations and measure changes against independent references.
+Detailed findings
 belong in `memories/MEMORY.md`, principles in `AGENTS.md`, and repeated procedures
 in skills.
 

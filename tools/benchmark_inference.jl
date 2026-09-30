@@ -80,6 +80,18 @@ function main()
             extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
             isdefined(extension, :metal_pool_stats) &&
                 (result["metal_pool"] = extension.metal_pool_stats())
+            # A post-trial snapshot depends on when finalizers have run.
+            # Keep it, then report a second snapshot after explicit collection
+            # and synchronization; neither operation is part of trial timing.
+            GC.gc(true)
+            Metal.synchronize()
+            isdefined(extension, :recycle_uploads!) && extension.recycle_uploads!()
+            isdefined(extension, :metal_pool_stats) &&
+                (result["metal_pool_after_gc"] = extension.metal_pool_stats())
+            if isdefined(extension, :trim_completed_buffer_pool!)
+                extension.trim_completed_buffer_pool!()
+                result["metal_pool_after_trim"] = extension.metal_pool_stats()
+            end
         end
         println(JSON.json(result, 2))
         if output !== nothing

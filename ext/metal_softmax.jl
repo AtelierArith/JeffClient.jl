@@ -45,10 +45,10 @@ end
 
 function masked_softmax(scores::Metal.MtlArray{Float32,3}, mask, head_dim)
     length = size(scores, 1)
-    length == size(scores, 2) == Base.length(mask) ||
+    device_mask = metal_device_mask(scores, mask)
+    length == size(scores, 2) == Base.length(device_mask) ||
         throw(DimensionMismatch("Attention mask dimensions must match."))
     columns = Base.length(scores) ÷ length
-    device_mask = JeffClient.on_native_device(scores, Float32.(mask))
     output = pooled_array(Float32, size(scores))
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) masked_softmax_kernel!(
         output,

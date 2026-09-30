@@ -22,7 +22,7 @@ function JeffClient.full_attention(attention, x::Metal.MtlMatrix{Float32}, mask,
         Tuple{Any,Any,Any,Any},
         attention,
         x,
-        mask,
+        metal_host_mask(mask),
         cfg,
     )
     0 <= cfg.rotary_dim <= cfg.head_dim && iseven(cfg.rotary_dim) ||

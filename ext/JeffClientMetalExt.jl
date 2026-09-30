@@ -182,6 +182,20 @@ function JeffClient.delta_solve(system::Metal.MtlMatrix, rhs::Metal.MtlMatrix)
     return output
 end
 
+struct PreparedMetalMask{H,D}
+    host::H
+    device::D
+end
+
+function JeffClient.native_prepare_mask(reference::Metal.MtlArray, mask)
+    PreparedMetalMask(mask, JeffClient.on_native_device(reference, Float32.(mask)))
+end
+
+metal_device_mask(reference, mask) = JeffClient.on_native_device(reference, Float32.(mask))
+metal_device_mask(reference, mask::PreparedMetalMask) = mask.device
+metal_host_mask(mask) = mask
+metal_host_mask(mask::PreparedMetalMask) = mask.host
+
 include("metal_delta.jl")
 include("metal_normalization.jl")
 include("metal_softmax.jl")

@@ -127,6 +127,66 @@ function main()
         GC.gc(true)
     end
     println("Validated fused RMS/RoPE, grouped head layouts, gates, and cache keys.")
+    for (width, heads, value_width) in ((7, 2, 3), (128, 2, 7), (256, 1, 9)),
+        length in (1, 9, 65)
+
+        value_heads = 2heads
+        channels = 2width * heads + value_width * value_heads
+        mixed = reshape(sin.(Float32.(1:(channels*length))), channels, length)
+        mixed[:, 1] .= 0.0f0 # Zero norms exercise epsilon and layout boundaries.
+        cfg = (key_dim = width, key_heads = heads)
+        gpu_mixed = Metal.MtlArray(mixed)
+        key_width = width * heads
+        q = Array(extension.packed_qk(gpu_mixed, cfg, length, 0, sqrt(Float32(width))))
+        k = Array(extension.packed_qk(gpu_mixed, cfg, length, key_width, 1.0f0))
+        expected_q = reshape(mixed[1:key_width, :], width, heads, length)
+        expected_k = reshape(mixed[(key_width+1):2key_width, :], width, heads, length)
+        expected_q =
+            expected_q ./
+            (sqrt.(sum(abs2, expected_q; dims = 1) .+ 1.0f-6) .* sqrt(Float32(width)))
+        expected_k = expected_k ./ sqrt.(sum(abs2, expected_k; dims = 1) .+ 1.0f-6)
+        isapprox(q, expected_q; atol = 2.0f-6, rtol = 2.0f-5) || error("Packed Q mismatch.")
+        isapprox(k, expected_k; atol = 2.0f-6, rtol = 2.0f-5) || error("Packed K mismatch.")
+        beta = fill(0.5f0, value_heads, length)
+        decay = fill(-0.1f0, value_heads, length)
+        gpu_q, gpu_k, gpu_beta, gpu_decay = Metal.MtlArray.((q, k, beta, decay))
+        output = extension.pooled_array(Float32, (value_width, value_heads, length))
+        Metal.@metal threads=(32, 8) groups=(cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
+            output,
+            gpu_q,
+            gpu_k,
+            gpu_mixed,
+            gpu_beta,
+            gpu_decay,
+            Int32(width),
+            Int32(value_width),
+            Int32(2key_width),
+            Int32(2),
+            Int32(length),
+            Val(cld(width, 32)),
+            Val(8),
+        )
+        expected = zeros(Float32, value_width, value_heads, length)
+        for head = 1:value_heads
+            key_head = cld(head, 2)
+            state = zeros(Float32, width, value_width)
+            for token = 1:length
+                query, key = q[:, key_head, token], k[:, key_head, token]
+                state .*= exp(decay[head, token])
+                v = mixed[
+                    (2key_width+(head-1)*value_width+1):(2key_width+head*value_width),
+                    token,
+                ]
+                correction = (v - transpose(state) * key) .* beta[head, token]
+                state .+= key * transpose(correction)
+                expected[:, head, token] = transpose(state) * query
+            end
+        end
+        isapprox(Array(output), expected; atol = 2.0f-5, rtol = 2.0f-4) ||
+            error("Packed V recurrent mismatch.")
+        GC.gc(true)
+    end
+    println("Validated packed Q/K normalization and direct V recurrent reads.")
 end
 
 main()
