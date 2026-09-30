@@ -1,10 +1,11 @@
 Laya.jl
 
 The Metal buffer pools, shared uploads, cached MPSGraph command-batch encoding,
-and SIMD reduction techniques in ext/ are adapted from
+SIMD reduction techniques, and fused RoPE/head layout preparation in ext/ are adapted from
 Laya.jl's ext/LayaMetalExt.jl, distributed under the Apache License 2.0.
 A copy of that license is included in licenses/Laya-Apache-2.0.txt.
 
 JeffClient modifications include queue-local eviction, product-only MPS graphs,
-RMS/L2 normalization, causal masked softmax, fused depthwise convolution,
+RMS/L2 normalization, partial RoPE with grouped KV heads and gated output,
+causal masked softmax, fused depthwise convolution,
 and a SIMD recurrent DeltaNet kernel with a triangular-solve fallback.

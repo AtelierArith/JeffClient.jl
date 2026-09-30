@@ -137,6 +137,7 @@ end
 include("metal_delta.jl")
 include("metal_normalization.jl")
 include("metal_softmax.jl")
+include("metal_rope.jl")
 include("metal_attention.jl")
 
 end

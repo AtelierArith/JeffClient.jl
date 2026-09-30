@@ -38,6 +38,15 @@
 - masked softmax も scale・causal/padding mask・maximum・exp・sum・正規化を一つのカーネルにした。dense な CPU mask が不要になり、中央値 0.253 秒、44,097 回 / 3,460,368 bytes。直前と速度の差は小さいが、heap bytes は約 32% 減った。実モデル 12 ケース × 3 回の最大 logit 誤差は `3.361702e-5`。
 - 上記 softmax 版の pool は計測終了時に約 3.41 GB の private バッファを保持していた。heap の削減は、GPU の保持メモリが同じ割合で減ることを意味しない。明示的 release と作業バッファの再利用は次の改善対象。
 
+## RoPE と head 配置変換の融合
+
+- Laya の `split_rope` を参考に、Q/K の centered RMS、partial RoPE、grouped KV head の展開、MPS 用 `(head_dim, sequence, heads)` 配置への書き込みを専用カーネルにまとめた。K の処理と同時に V を配置し、出力側の配置変換と sigmoid gate も一つにまとめた。通常の slice、`cat`、`permutedims`、KV index の GPU アップロードが full attention から消えた。
+- RoPE の cos/sin は queue ごとに現在の一組だけをキャッシュする。キーは rotary width・系列長・Float32 の base。CPU 実装と同じ Float32 の周波数計算を使う。テーブルを置き換えても queued kernel が配列を保持するため、使用中の shared バッファを CPU が書き換えない。
+- 単体検証では、head width 4/7/256、full/partial/no RoPE、KV の共有あり・なし、rotary width と base の変更、cache hit、出力 gate を CPU 実装と比較した。小さい fixture は最大誤差 `2.3841858e-7`。実モデル 12 ケース × 3 回の最大 logit 誤差は引き続き `3.361702e-5`。
+- 同じ batch 1・長さ 256・101 active tokens・Float32、20 回の計測で中央値 **234.060896 ms**、**33,202 回 / 1,640,432 bytes** になった。直前の 253.363667 ms に対して中央値は約 7.6% 短く、割当数は約 25%、heap bytes は約 53% 減った。最小 217.6 ms、p95 312.3 ms、最大 382.3 ms でばらつきがあり、tail latency の改善とは扱わない。
+- 計測終了時の private free pool は約 1.57 GB。保持量は GC・系列長・試行の履歴で変わるため、これをピーク GPU メモリの測定値とは扱わない。
+- `@code_warntype` / JET の 6 対象（logits、delta/full layer、DeltaNet、linear、Metal matmul）はすべて報告なし。10% の Profile.Allocs では 3,651 サンプルを取得し、MPS の feed/result・tensor-data の 3 箇所が 1,229 サンプル（約 34%）だった。RoPE の slice 等は上位から消え、residual・MLP の個別 broadcast とカーネル起動の管理オブジェクトが残った。サンプルの割合は実行時間の割合ではない。
+
 ## Laya を再読して分かった点
 
 - 正規化で `sum(map(abs2, values))` を使うと、`values` が 32 要素の register tuple（hidden width 1024）になったところで LLVM の `CallAnalyzer::analyze` が Bus error になった。幅 8・128・256 は通った。2 次元 grid と `@inbounds` だけでは解消しなかった。

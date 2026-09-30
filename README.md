@@ -132,8 +132,9 @@ result = decide(backend, inputs, question)
 Metal is an optional package extension. It uses Metal.jl arrays, cached MPSGraph
 products encoded into the current command batch, pooled output buffers, shared
 uploads, and Julia Metal kernels for recurrent DeltaNet, depthwise convolution,
-RMS/L2 normalization, and causal masked softmax. Full-attention heads use batched
-matrix products. Product-only graphs omit `beta*C`, so recycled destination
+RMS/L2 normalization, causal masked softmax, and fused partial RoPE/head layouts
+with queue-local trigonometric tables. Full-attention heads use batched matrix
+products. Product-only graphs omit `beta*C`, so recycled destination
 contents are never read; NaN-poisoned destinations are checked by a verifier.
 For DeltaNet key widths above 256, the stable chunked triangular solve remains
 available. Forming its inverse with repeated products was numerically unstable.
@@ -158,7 +159,7 @@ julia --project=tools tools/verify_native.jl CHECKPOINT_DIRECTORY metal
 # Generate independent references through PythonCall, then validate on Metal:
 julia --project=tools tools/build_metal_reference.jl CHECKPOINT_DIRECTORY artifacts/metal-validation/reference.json
 julia --project=tools tools/verify_metal.jl CHECKPOINT_DIRECTORY artifacts/metal-validation/reference.json 2
-# Products with NaN destinations, and RMS at real model widths:
+# NaN product destinations, real RMS widths, RoPE/grouped layouts and gates:
 julia --project=tools tools/verify_metal_primitives.jl
 ```
 
@@ -179,37 +180,42 @@ scores to CPU are included. GPU measurements wait for completion.
 | Backend | Weight precision | Samples | Median per forward |
 | --- | --- | ---: | ---: |
 | Native Julia CPU (8 BLAS threads) | Float32 | 10 | 1.834 s |
-| Native Julia Metal (fused kernels) | Float32 | 20 | 0.253 s |
+| Native Julia Metal (fused kernels) | Float32 | 20 | 0.234 s |
 | Original Jeff / PyTorch CPU (8 threads) | Float32 | 10 | 2.988 s |
 | Original Jeff / PyTorch MPS | BF16 (original default) | 10 | 0.333 s |
 | Original Jeff / PyTorch MPS | Float32 | 20 | 0.350 s |
 
-For this prepared batch-1 case, Julia Metal takes about **28% less time than
-PyTorch MPS at the same Float32 precision** (~1.38× throughput). This comparison
+For this prepared batch-1 case, Julia Metal takes about **33% less time than
+PyTorch MPS at the same Float32 precision** (~1.49× throughput). This comparison
 does not establish performance for other lengths or batch sizes.
 The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 1.90 s and its first forward took 13.72 s
+Julia Metal's model loading took 1.87 s and its first forward took 13.36 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 44,097 Julia heap allocations / 3.46 MB per
+BenchmarkTools measured 33,202 Julia heap allocations / 1.64 MB per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
-fell from 2.492 s to 0.253 s (~9.8× faster). Allocation counts fell from 2,845,912
-to 44,097 (~98.5%), and Julia heap bytes from 145,768,352 to 3,460,368 (~97.6%). Device-only buffers
+fell from 2.492 s to 0.234 s (~10.6× faster). Allocation counts fell from 2,845,912
+to 33,202 (~98.8%), and Julia heap bytes from 145,768,352 to 1,640,432 (~98.9%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
 overwrites destinations without reading their previous contents.
 
-The trial recorded 6,418 private-buffer reuses and 965 shared-upload reuses.
-It retained about 3.41 GB of free device buffers afterward: reducing allocation
+RoPE/head fusion reduced allocations from 44,097 to 33,202 and heap bytes from
+3.46 MB to 1.64 MB. Median latency fell from 253 to 234 ms; the latest trial's
+minimum/p95/maximum were 218/312/382 ms, so a tail-latency improvement is not established.
+
+The trial recorded 6,256 private-buffer reuses and 425 shared-upload reuses.
+It retained about 1.57 GB of free device buffers afterward: reducing allocation
 uses a cache and does not imply lower total resident memory. Private free caches
 are trimmed on allocation pressure at one quarter of the recommended working
-set per queue; retained shared uploads are limited to 64 MB per queue.
+set per queue; retained shared uploads are limited to 64 MB per queue. The pool
+size depends on GC and prior calls; it is not a measurement of peak GPU memory.
 
 ```bash
 julia --project=tools tools/benchmark_inference.jl CHECKPOINT_DIRECTORY metal artifacts/jeff-0.8b-onnx/reference.json 1 20 artifacts/metal-validation/benchmark-metal.json

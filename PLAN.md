@@ -139,18 +139,25 @@ extension methods at that stage.
   reads. NaN-poisoned matrix/transpose/batch checks pass.
 - Fuse RMS/L2 normalization and masked softmax, using Laya's SIMD reductions.
   An explicit accumulator loop avoids LLVM's crash on a 32-element tuple sum.
+- Fuse Q/K RMS, partial RoPE, grouped head expansion, and the MPS head layout;
+  merge output layout and sigmoid gating in one kernel. Cache the current RoPE
+  table pair per queue with width/length/base in its key.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.253 s**, original Python MPS
-**0.350 s**. Julia heap: **44,097 allocations / 3,460,368 bytes**. This is ~9.8×
-faster than the 2.492 s implementation, with ~98.5% fewer allocations. Loading
+20 warmed synchronized calls: Julia Metal **0.234 s**, original Python MPS
+**0.350 s**. Julia heap: **33,202 allocations / 1,640,432 bytes**. This is ~10.6×
+faster than the 2.492 s implementation, with ~98.8% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
 GC between cases and disabled scalar indexing. The tiny fixture and primitive
-checks cover independent scores and real RMS widths.
+checks cover independent scores, real RMS widths, grouped head layouts,
+partial/full/no RoPE, gates, and cache keys. All six inspected JET targets are
+clean. MPS feed/result and tensor-data sites account for about one third of the
+latest 10% allocation sample; residual/MLP operations and kernel launches remain.
 
-The benchmark retained ~3.41 GB of private pooled buffers. Next work:
-RoPE/layout fusion and table reuse; fused residual/normalization and MLP gates;
+The benchmark retained ~1.57 GB of private pooled buffers; this is not peak GPU
+memory. The timing range is broad, so tail-latency improvement is not established.
+Next work: fused residual/normalization and MLP gates;
 explicit intermediate release for reuse within a forward; reusable workspaces
 and MPS feed descriptors. Reduce remaining heap allocations and measure each
 change while preserving independent-reference agreement. Detailed findings

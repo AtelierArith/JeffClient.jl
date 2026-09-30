@@ -17,46 +17,32 @@ function head_matmul(
 end
 
 function JeffClient.full_attention(attention, x::Metal.MtlMatrix{Float32}, mask, cfg)
+    cfg.head_dim > 4096 && return invoke(
+        JeffClient.full_attention,
+        Tuple{Any,Any,Any,Any},
+        attention,
+        x,
+        mask,
+        cfg,
+    )
+    0 <= cfg.rotary_dim <= cfg.head_dim && iseven(cfg.rotary_dim) ||
+        throw(ArgumentError("Rotary width must be even and within the head width."))
     length = size(x, 2)
-    qgate =
-        reshape(JeffClient.native_linear(attention.q, x), 2cfg.head_dim, cfg.heads, length)
-    query = JeffClient.native_rope(
-        JeffClient.native_rms(qgate[1:cfg.head_dim, :, :], attention.q_norm, cfg.eps),
-        cfg,
-    )
-    key = JeffClient.native_rope(
-        JeffClient.native_rms(
-            reshape(
-                JeffClient.native_linear(attention.k, x),
-                cfg.head_dim,
-                cfg.kv_heads,
-                length,
-            ),
-            attention.k_norm,
-            cfg.eps,
-        ),
-        cfg,
-    )
-    value = reshape(
+    tables = rope_tables(x, cfg, length)
+    qgate = JeffClient.native_linear(attention.q, x)
+    query = prepare_query(qgate, attention.q_norm, tables, cfg, length)
+    key, value = prepare_key_value(
+        JeffClient.native_linear(attention.k, x),
         JeffClient.native_linear(attention.v, x),
-        cfg.head_dim,
-        cfg.kv_heads,
+        attention.k_norm,
+        tables,
+        cfg,
         length,
     )
-    groups = cfg.heads ÷ cfg.kv_heads
-    kv_heads =
-        JeffClient.on_native_device(x, Int32[cld(head, groups) for head = 1:cfg.heads])
-    query = permutedims(query, (1, 3, 2))
-    key = permutedims(key[:, kv_heads, :], (1, 3, 2))
-    value = permutedims(value[:, kv_heads, :], (1, 3, 2))
     scores = head_matmul(key, query, 'T', 'N')
     probabilities = masked_softmax(scores, mask, cfg.head_dim)
-    values = permutedims(head_matmul(value, probabilities, 'N', 'N'), (1, 3, 2))
-    gated = values .* JeffClient.native_sigmoid.(qgate[(cfg.head_dim+1):end, :, :])
-    return JeffClient.native_linear(
-        attention.out,
-        reshape(gated, cfg.head_dim * cfg.heads, length),
-    )
+    values = head_matmul(value, probabilities, 'N', 'N')
+    return JeffClient.native_linear(attention.out, merge_gate(values, qgate, cfg, length))
 end
 
 function causal_depthwise_kernel!(output, input, weight, channels, length, kernel)

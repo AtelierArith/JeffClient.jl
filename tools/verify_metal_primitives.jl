@@ -61,6 +61,70 @@ function main()
         GC.gc(true)
     end
     println("Validated RMS normalization widths and centered/noncentered weights.")
+    for (width, heads, kv_heads, rotary_dim, length, theta) in (
+        (4, 2, 1, 4, 3, 10000.0f0),
+        (7, 3, 3, 2, 1, 1000000.0f0),
+        (256, 8, 2, 64, 65, 10000000.0f0),
+        (256, 8, 2, 128, 65, 10000000.0f0),
+        (256, 8, 2, 128, 65, 10000.0f0),
+        (256, 8, 2, 0, 3, 10000.0f0),
+    )
+        cfg = (
+            head_dim = width,
+            heads = heads,
+            kv_heads = kv_heads,
+            rotary_dim = rotary_dim,
+            rope_theta = theta,
+            eps = 1.0f-6,
+        )
+        println("Checking fused heads: ", cfg, "; length ", length)
+        flush(stdout)
+        qgate = reshape(sin.(Float32.(1:(2width*heads*length))), 2width * heads, length)
+        key = reshape(cos.(Float32.(1:(width*kv_heads*length))), width * kv_heads, length)
+        value = sin.(key)
+        weight = cos.(Float32.(1:width)) .* 0.1f0
+        gpu_q, gpu_k, gpu_v, gpu_w = Metal.MtlArray.((qgate, key, value, weight))
+        tables = extension.rope_tables(gpu_q, cfg, length)
+        repeated = extension.rope_tables(gpu_q, cfg, length)
+        tables[1] === repeated[1] && tables[2] === repeated[2] ||
+            error("RoPE cache did not reuse its tables.")
+        actual_q = Array(extension.prepare_query(gpu_q, gpu_w, tables, cfg, length))
+        gpu_key, gpu_value =
+            extension.prepare_key_value(gpu_k, gpu_v, gpu_w, tables, cfg, length)
+        actual_k, actual_v = Array(gpu_key), Array(gpu_value)
+        qheads = reshape(qgate, 2width, heads, length)
+        expected_q = permutedims(
+            JeffClient.native_rope(
+                JeffClient.native_rms(qheads[1:width, :, :], weight, cfg.eps),
+                cfg,
+            ),
+            (1, 3, 2),
+        )
+        expected_k = JeffClient.native_rope(
+            JeffClient.native_rms(reshape(key, width, kv_heads, length), weight, cfg.eps),
+            cfg,
+        )
+        mapping = [cld(head, heads ÷ kv_heads) for head = 1:heads]
+        expected_k = permutedims(expected_k[:, mapping, :], (1, 3, 2))
+        expected_v =
+            permutedims(reshape(value, width, kv_heads, length)[:, mapping, :], (1, 3, 2))
+        isapprox(actual_q, expected_q; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Fused query mismatch.")
+        isapprox(actual_k, expected_k; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Fused key mismatch.")
+        actual_v == expected_v || error("Grouped value layout mismatch.")
+        merged = Array(extension.merge_gate(gpu_value, gpu_q, cfg, length))
+        expected_merged = reshape(
+            permutedims(expected_v, (1, 3, 2)) .*
+            JeffClient.native_sigmoid.(qheads[(width+1):end, :, :]),
+            width * heads,
+            length,
+        )
+        isapprox(merged, expected_merged; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Merged gate mismatch.")
+        GC.gc(true)
+    end
+    println("Validated fused RMS/RoPE, grouped head layouts, gates, and cache keys.")
 end
 
 main()
