@@ -1,23 +1,41 @@
 # One logical 32-lane SIMD group normalizes a column. Fixed-size tuples keep
 # inputs in registers through the reduction and output, without scratch arrays.
+struct NormalizationConfig{PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}
+    eps::Float32
+    factor::Float32
+    width::Int32
+    columns::Int32
+end
+
+function normalization_config(
+    width,
+    columns,
+    eps,
+    factor,
+    ::Val{MEAN},
+    ::Val{CENTERED},
+    ::Val{WEIGHTED},
+    ::Val{RESIDUAL},
+    ::Val{GATED},
+) where {MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}
+    return NormalizationConfig{cld(width, 32),MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}(
+        Float32(eps),
+        Float32(factor),
+        Int32(width),
+        Int32(columns),
+    )
+end
+
 function normalization_kernel!(
     output,
     input,
     added,
     residual,
     weight,
-    eps,
-    factor,
-    width,
-    columns,
-    ::Val{PARTS},
-    ::Val{MEAN},
-    ::Val{CENTERED},
-    ::Val{WEIGHTED},
-    ::Val{RESIDUAL},
     gate,
-    ::Val{GATED},
+    config::NormalizationConfig{PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED},
 ) where {PARTS,MEAN,CENTERED,WEIGHTED,RESIDUAL,GATED}
+    eps, factor, width, columns = config.eps, config.factor, config.width, config.columns
     local_index = Metal.thread_position_in_threadgroup_2d()
     group = Metal.threadgroup_position_in_grid_2d().x
     lane = Int32(local_index.x)
@@ -69,23 +87,25 @@ function fused_normalization(x, weight, eps, factor, mean, centered, weighted)
     width = size(x, 1)
     columns = length(x) ÷ width
     output = pooled_array(Float32, size(x))
+    config = normalization_config(
+        width,
+        columns,
+        eps,
+        factor,
+        mean,
+        centered,
+        weighted,
+        Val(false),
+        Val(false),
+    )
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
         output,
         x,
         nothing,
         nothing,
         weight,
-        Float32(eps),
-        Float32(factor),
-        Int32(width),
-        Int32(columns),
-        Val(cld(width, 32)),
-        mean,
-        centered,
-        weighted,
-        Val(false),
         nothing,
-        Val(false),
+        config,
     )
     return output
 end
@@ -110,23 +130,25 @@ function JeffClient.native_residual_rms(
     residual = pooled_array(Float32, size(x))
     output = pooled_array(Float32, size(x))
     width, columns = size(x)
+    config = normalization_config(
+        width,
+        columns,
+        eps,
+        1.0f0,
+        Val(true),
+        Val(true),
+        Val(true),
+        Val(true),
+        Val(false),
+    )
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
         output,
         x,
         mixed,
         residual,
         weight,
-        Float32(eps),
-        1.0f0,
-        Int32(width),
-        Int32(columns),
-        Val(cld(width, 32)),
-        Val(true),
-        Val(true),
-        Val(true),
-        Val(true),
         nothing,
-        Val(false),
+        config,
     )
     return residual, output
 end
@@ -140,25 +162,96 @@ function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps)
     width = size(x, 1)
     columns = length(x) ÷ width
     output = pooled_array(Float32, size(x))
+    config = normalization_config(
+        width,
+        columns,
+        eps,
+        1.0f0,
+        Val(true),
+        Val(false),
+        Val(true),
+        Val(false),
+        Val(true),
+    )
     Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
         output,
         x,
         nothing,
         nothing,
         weight,
-        Float32(eps),
-        1.0f0,
-        Int32(width),
-        Int32(columns),
-        Val(cld(width, 32)),
-        Val(true),
-        Val(false),
-        Val(true),
-        Val(false),
         gate,
-        Val(true),
+        config,
     )
     return output
+end
+
+# The previous layer's MLP has already consumed its normalized residual.
+# Read and update each residual element on the same queue while normalizing it.
+function residual_input_rms!(residual, mixed, weight, eps)
+    size(residual) == size(mixed) || throw(DimensionMismatch("Residual shapes must match."))
+    length(weight) == size(residual, 1) ||
+        throw(DimensionMismatch("RMS weight width must match."))
+    width, columns = size(residual)
+    output = pooled_array(Float32, size(residual))
+    config = normalization_config(
+        width,
+        columns,
+        eps,
+        1.0f0,
+        Val(true),
+        Val(true),
+        Val(true),
+        Val(true),
+        Val(false),
+    )
+    Metal.@metal threads=(32, 8) groups=(cld(columns, 8), 1) normalization_kernel!(
+        output,
+        residual,
+        mixed,
+        residual,
+        weight,
+        nothing,
+        config,
+    )
+    return residual, output
+end
+
+function JeffClient.native_hidden_forward(
+    hidden::Metal.MtlMatrix{Float32},
+    layers,
+    mask,
+    final_norm,
+    cfg,
+)
+    size(hidden, 1) > 4096 && return invoke(
+        JeffClient.native_hidden_forward,
+        Tuple{Any,Any,Any,Any,Any},
+        hidden,
+        layers,
+        mask,
+        final_norm,
+        cfg,
+    )
+    isempty(layers) && return JeffClient.native_rms(hidden[:, end:end], final_norm, cfg.eps)
+    first_layer = first(layers)
+    normalized = JeffClient.native_rms(hidden, first_layer.input_norm, cfg.eps)
+    residual, mlp =
+        JeffClient.native_layer_outputs(first_layer, hidden, normalized, mask, cfg)
+    for index = 2:length(layers)
+        layer = layers[index]
+        hidden, normalized = residual_input_rms!(residual, mlp, layer.input_norm, cfg.eps)
+        residual, mlp =
+            JeffClient.native_layer_outputs(layer, hidden, normalized, mask, cfg)
+    end
+    # The last layer needs only the readout column, not a full residual sum.
+    last_column = size(residual, 2)
+    _, normalized = residual_input_rms!(
+        view(residual, :, last_column:last_column),
+        view(mlp, :, last_column:last_column),
+        final_norm,
+        cfg.eps,
+    )
+    return normalized
 end
 
 function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered = true)

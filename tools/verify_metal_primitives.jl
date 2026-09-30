@@ -28,6 +28,34 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    for width in (7, 128, 1024), sequence_length in (1, 9, 65)
+        host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
+        mixed = cos.(host)
+        weight = sin.(Float32.(1:width))
+        expected_residual = host .+ mixed
+        expected = JeffClient.native_rms(expected_residual, weight, 1.0f-6)
+        gpu_host, gpu_mixed, gpu_weight = Metal.MtlArray.((host, mixed, weight))
+        residual, normalized =
+            extension.residual_input_rms!(gpu_host, gpu_mixed, gpu_weight, 1.0f-6)
+        residual === gpu_host || error("Input RMS must reuse its residual.")
+        Array(residual) == expected_residual || error("Input RMS residual mismatch.")
+        isapprox(Array(normalized), expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Input RMS normalization mismatch.")
+        column = sequence_length:sequence_length
+        expected_residual[:, column] .+= mixed[:, column]
+        _, normalized = extension.residual_input_rms!(
+            view(gpu_host, :, column),
+            view(gpu_mixed, :, column),
+            gpu_weight,
+            1.0f-6,
+        )
+        GC.gc(true)
+        Array(gpu_host) == expected_residual || error("View RMS changed other columns.")
+        expected = JeffClient.native_rms(expected_residual[:, column], weight, 1.0f-6)
+        isapprox(Array(normalized), expected; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("View input RMS mismatch after GC.")
+    end
+    println("Validated fused in-place residual/input RMS after GC.")
     for width in (7, 128, 1024), sequence_length in (0, 1, 9, 65)
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mixed = cos.(host)

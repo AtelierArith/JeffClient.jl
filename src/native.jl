@@ -326,6 +326,11 @@ end
 
 function native_layer(layer, x, mask, cfg)
     normalized = native_rms(x, layer.input_norm, cfg.eps)
+    residual, mlp = native_layer_outputs(layer, x, normalized, mask, cfg)
+    return native_residual_add!(residual, mlp)
+end
+
+function native_layer_outputs(layer, x, normalized, mask, cfg)
     mixed =
         layer.attention.kind == :full ?
         full_attention(layer.attention, normalized, mask, cfg) :
@@ -336,7 +341,15 @@ function native_layer(layer, x, mask, cfg)
     mlp = native_linear(layer.mlp.down, native_mlp_gate!(gate, up))
     # residual is owned by this layer; its normalization has already consumed
     # the old values, so reuse it for the final sum on the same device queue.
-    return native_residual_add!(residual, mlp)
+    return residual, mlp
+end
+
+function native_hidden_forward(hidden, layers, mask, final_norm, cfg)
+    for layer in layers
+        hidden = native_layer(layer, hidden, mask, cfg)
+    end
+    # RMS normalizes each column independently; readout needs only the last.
+    return native_rms(hidden[:, end:end], final_norm, cfg.eps)
 end
 
 """
@@ -366,12 +379,13 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
         scores = native_forward_scope(backend.embedding) do
             hidden = native_gather(backend.embedding, vec(ids[row, :]))
             row_mask = native_prepare_mask(hidden, vec(mask[row, :]))
-            for layer in backend.layers
-                hidden = native_layer(layer, hidden, row_mask, backend.config)
-            end
-            # RMS normalizes each column independently; readout needs only the last.
-            hidden =
-                native_rms(hidden[:, end:end], backend.final_norm, backend.config.eps)
+            hidden = native_hidden_forward(
+                hidden,
+                backend.layers,
+                row_mask,
+                backend.final_norm,
+                backend.config,
+            )
             native_host(native_linear(backend.readout, hidden))
         end
         result[row, :] .= vec(scores)
