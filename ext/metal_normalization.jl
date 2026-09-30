@@ -288,13 +288,19 @@ function JeffClient.native_residual_rms(
     return residual, output
 end
 
-function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps)
+function rms_silu_gate(x::Metal.MtlArray{Float32}, gate, weight, eps, output_dims = size(x))
     size(x) == size(gate) || throw(DimensionMismatch("RMS gate shapes must match."))
     length(weight) == size(x, 1) ||
         throw(DimensionMismatch("RMS weight width must match the input."))
-    size(x, 1) > 4096 && return JeffClient.native_rms(x, weight, eps; centered = false) .*
-           JeffClient.native_silu.(gate)
-    output = pooled_array(Float32, size(x))
+    prod(output_dims) == length(x) ||
+        throw(DimensionMismatch("RMS output must match input length."))
+    if size(x, 1) > 4096
+        output =
+            JeffClient.native_rms(x, weight, eps; centered = false) .*
+            JeffClient.native_silu.(gate)
+        return reshape(output, output_dims)
+    end
+    output = pooled_array(Float32, output_dims)
     launch_normalization!(
         output,
         x,

@@ -470,6 +470,21 @@ function main()
         gpu_host, gpu_gate, gpu_weight = Metal.MtlArray.((host, gate, weight))
         for pass = 1:2
             actual = Array(extension.rms_silu_gate(gpu_host, gpu_gate, gpu_weight, 1.0f-6))
+            flattened = Array(
+                extension.rms_silu_gate(
+                    gpu_host,
+                    gpu_gate,
+                    gpu_weight,
+                    1.0f-6,
+                    (2width, 3),
+                ),
+            )
+            isapprox(
+                flattened,
+                reshape(expected, 2width, 3);
+                atol = 2.0f-5,
+                rtol = 2.0f-5,
+            ) || error("Flattened RMS/SiLU gate mismatch.")
             isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) ||
                 error("RMS SiLU gate mismatch.")
             GC.gc(true)

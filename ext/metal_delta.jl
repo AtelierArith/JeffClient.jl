@@ -323,9 +323,12 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
             Val(rows),
         )
     end
-    gated = rms_silu_gate(output, z, attention.norm, cfg.eps)
-    return JeffClient.native_linear(
-        attention.out,
-        reshape(gated, cfg.value_dim * cfg.value_heads, length),
+    gated = rms_silu_gate(
+        output,
+        z,
+        attention.norm,
+        cfg.eps,
+        (cfg.value_dim * cfg.value_heads, length),
     )
+    return JeffClient.native_linear(attention.out, gated)
 end
