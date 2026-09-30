@@ -597,3 +597,12 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - B2/L65・同じF32/flag設定の50回比較ではbatch **3,971 allocations /218,736 bytes /中央値112.488584 ms**、min/p95/max111.669958/113.5605/113.850333 ms。row control **7,793 /418,272 /105.4916875 ms**、min/p95/max104.779666/106.119125/114.781458 ms。host割当3,822件 /199,536 bytes少ないがbatch中央値は約6.6%長い。workspace保持batch428,310,528、row329,613,312 bytes。結果は `benchmark-metal-batched-b2-l65.json` と `benchmark-metal-row-control-b2-l65.json`。mixed paddingを含むため、次に元の独立参照case5の第1行を2行へ複製した `reference-b2-equal-l65.json` を作った。入力と対応するPyTorch logitを両方複製しており、新しく計算した参照ではない。同長版のbatch50回測定を `/private/tmp/jeff-batched-b2-equal-l65-benchmark.log` で実行する。
 - ユーザーの区切り・結論依頼に従い、残件をGitHub Issueへ登録した。#1 batchの適用条件と設定/所有検証、#2 層間bufferとtensor-data再利用によるGPU保持量削減、#3 kernel引数encode/boxing/rootsの残存heap割当削減。同長L65 batchの測定は完了したが対応row比較は未実施であり、Issue #1へ引き継ぐ。未確認の条件でbatch高速化を主張せず既定無効を維持する。
 - 同長B2/L65 batchの50回中央値112.428438 ms、3,971 allocations /218,736 bytes、最大logit誤差1.4781952e-5（`benchmark-metal-batched-b2-equal-l65.json`）。同じ入力のrow結果がないため速度比は未確定。
+
+## 2026-10-01: README の実際の0.8Bデモを再測定
+
+- `mstrasser/Jeff-Qwen3.5-0.8B` revision `0f212b3e72acb4dde3f7da61e925d6ab7f819990` の safetensors を使用。tiny fixture/ONNX graphではない。README parcelデモと旧独立PyTorch参照case1の入力が同一であることを確認し、入力・参照logitsを `examples/data/parcel_reference.json` に保存した。
+- Apple M4、Julia1.13.1/Metal1.11.1/PyTorch2.14.0、Float32、B1/L256/active101、各20回、CPU8threads、バックエンドを順に独立実行。load/compile/tokenization/calibrationを除外し、readoutとCPUスコア返却・GPU同期を含む。PythonはGPU入力を事前準備、JuliaはCPU入力のuploadをforward内に含む。
+- 中央値/p95(ms): Julia CPU1893.106/2062.085、Python CPU3015.735/3023.922（1.59倍）、Julia Metal既定197.007/204.068、Python MPS-F32364.013/375.429（1.85倍）、Julia workspace+trim89.379/93.190（Python比4.07倍）。任意設定はworkspace/trimのみ1、他flagは0。trimは計算長101、既定は256。
+- 最大絶対logit誤差: CPU1.049e-5、Metal既定6.676e-6、trim7.629e-6。先頭mask0のみ除去し有効tokenは残す。今回と既存の参照検証の数値一致は確認したが、大規模な分類精度評価とは区別する。
+- Julia CPU loading0.780s/first forward5.349s、Metal既定2.247s/15.290s。package import/downloadはこの時間に含まれない。
+- 元Jeff commit `f06788292874c21a5b5c41549ac220dd9e15da7f`、FLA/causal-conv1dなしのPyTorch fallback。MLX比較ではない。生JSONはignored `artifacts/metal-validation/demo-0.8b-{cpu,metal,metal-trim,python-cpu,python-mps}.json`。公開表・再実行手順は `docs/src/performance.md`。

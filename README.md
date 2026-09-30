@@ -88,10 +88,12 @@ Detailed documentation is maintained with Documenter.jl in [`docs/`](docs):
 - [API reference](docs/src/api.md)
 - [Development and documentation builds](docs/src/development.md)
 
-On the measured Apple M4 Float32 inputs, Metal inference is about 1.8× faster
-than Python MPS by default, and 2.2–4.1× with padding-related optimizations.
-These results depend on inputs and settings; see the performance page for
-conditions and limitations. Joint GPU batching remains experimental.
+For this real 0.8B demo on Apple M4, warmed Float32 Metal inference takes about
+197 ms per forward, versus 364 ms for original Python MPS (1.85× faster).
+Optional workspace reuse and padding trim reduce it to 89 ms (4.07×).
+See [measured inference speed](https://github.com/AtelierArith/JeffClient.jl/blob/main/docs/src/performance.md#measured-inference-speed)
+for CPU results, first-run costs, comparison conditions, and reproducible commands.
+Joint GPU batching remains experimental.
 
 The [development plan](PLAN.md), [measurement notes](memories/MEMORY.md), and
 [open issues](https://github.com/AtelierArith/JeffClient.jl/issues) track remaining work.

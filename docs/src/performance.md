@@ -1,6 +1,117 @@
 # Measured inference speed
 
-## Current results and remaining work
+## Real 0.8B checkpoint: the README demo
+
+These benchmarks use **Jeff's actual trained 0.8B weights**, not the tiny test
+model. The checkpoint is `mstrasser/Jeff-Qwen3.5-0.8B`, pinned to revision
+`0f212b3e72acb4dde3f7da61e925d6ab7f819990`. Native Julia loads its safetensors
+directly; no ONNX export is used for these measurements.
+
+We measured the same parcel inquiry as `examples/native_inference.jl` and
+`examples/metal_inference.jl`: one decision, 256 input positions, with 101
+active tokens and 155 leading padding positions. The decision is `delivery`
+with probability about 99.66%.
+
+### How to read the numbers
+
+**Latency is the time for one complete model forward after warm-up.** Smaller
+is faster. It includes the trained readout and returning scores to CPU. It
+excludes package startup, weight loading, compilation, tokenization, and the
+small probability-calibration step in `decide`. Running the demo as a new
+process therefore takes longer than the latency in this table.
+
+Measured on Apple M4 on 2026-10-01, Julia 1.13.1, Metal 1.11.1, and PyTorch
+2.14.0. All rows use Float32 and 20 measured forwards; CPU uses 8 threads.
+Backends were run separately. Speed ratios compare CPU with CPU and GPU with GPU.
+
+| Backend | Computed tokens | Median per decision | p95 | Speed vs corresponding Python backend |
+| --- | ---: | ---: | ---: | ---: |
+| Original Python / PyTorch CPU | 256 | 3,016 ms | 3,024 ms | 1× |
+| Native Julia CPU | 256 | 1,893 ms | 2,062 ms | **1.59×** |
+| Original Python / PyTorch MPS | 256 | 364 ms | 375 ms | 1× |
+| Native Julia Metal, default | 256 | 197 ms | 204 ms | **1.85×** |
+| Native Julia Metal, workspace + padding trim | 101 | 89 ms | 93 ms | **4.07×** |
+
+For this input, default Metal takes about 46% less time than Python MPS.
+The optional configuration takes about 75% less time: workspace buffers are
+reused, and the leading padding is removed before computation. Both use the
+same logical input and agree with the independent Python reference. The
+largest absolute Julia logit error in these runs was `1.05e-5`.
+
+The 89 ms result requires `JEFF_METAL_WORKSPACE=1` and
+`JEFF_METAL_TRIM_PADDING=1`; it is **not the default demo setting**. All other
+Metal optimization flags were disabled. This comparison is with the original
+Jeff PyTorch implementation, using its reference DeltaNet/convolution fallback
+kernels without FLA or causal-conv1d. It does not compare against MLX or every
+optimized Python implementation. Different prompts, lengths, batches, and
+hardware can produce different ratios.
+
+### Does removing padding change accuracy?
+
+Padding trim removes only the **leading positions whose attention mask is zero**.
+It preserves every active token, their order, and interior mask holes. It does
+not truncate the prompt. For this checkpoint's causal attention and masked
+DeltaNet path, the implementation has been checked against independent PyTorch
+scores, including padded inputs and interior mask holes.
+
+In this demo, trimming kept the `delivery` decision and its approximately
+99.66% probability. Maximum absolute logit error versus the independent
+reference was `7.63e-6` with trimming and `6.68e-6` without it. These differences
+are within the numerical verification tolerance; outputs are not bit-identical.
+This is evidence of numerical agreement on the tested inputs, not a large-scale
+classification-accuracy evaluation or a guarantee for other model architectures.
+
+### First run versus repeated inference
+
+In these runs, native CPU weight loading took 0.78 s and its first forward
+took 5.35 s. Default Metal loading took 2.25 s and its first forward took
+15.29 s. These timings exclude package imports and the checkpoint download;
+the first model download is about 1.7 GB. Keep the loaded backend alive when
+making repeated decisions to amortize loading and compilation.
+
+### Reproduce the real-checkpoint benchmark
+
+From the repository root, install the tools environment and resolve the same
+checkpoint. The bundled `examples/data/parcel_reference.json` contains the
+demo's exact token inputs and independently computed original Python logits.
+It is measurement data, not a model. No ONNX graph is needed.
+
+```bash
+julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+CHECKPOINT=$(julia --project -e 'using JeffClient; print(resolve_checkpoint("mstrasser/Jeff-Qwen3.5-0.8B"; revision="0f212b3e72acb4dde3f7da61e925d6ab7f819990"))')
+
+# CPU: case 1, 20 measured forwards, JSON output.
+julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-cpu.json
+# Apple GPU: default settings (start with no JEFF_METAL_* flags set).
+julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" metal examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-metal.json
+# Apple GPU: optional workspace and leading-padding trim.
+JEFF_METAL_WORKSPACE=1 JEFF_METAL_TRIM_PADDING=1 julia --project=tools tools/benchmark_inference.jl "$CHECKPOINT" metal examples/data/parcel_reference.json 1 20 artifacts/benchmarks/native-metal-trim.json
+```
+
+For the original Python comparison, install Git and uv and prepare the original
+source checkout at the measured commit (skip cloning if it already exists):
+
+```bash
+git clone https://github.com/firelex/jeff extern/jeff
+git -C extern/jeff checkout f06788292874c21a5b5c41549ac220dd9e15da7f
+uv sync --project extern/jeff --frozen --no-default-groups
+julia --project=tools tools/benchmark_original.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 20 artifacts/benchmarks/python-cpu.json 1
+julia --project=tools tools/benchmark_original.jl "$CHECKPOINT" mps-f32 examples/data/parcel_reference.json 20 artifacts/benchmarks/python-mps.json 1
+```
+
+Python is accessed through PythonCall.jl using `extern/jeff/.venv/bin/python`.
+Use `mps-f32` for the Float32 comparison; `mps` uses the original BF16 default.
+Both tools verify scores before measuring. GPU runs wait for completion.
+Julia includes uploading prepared CPU inputs; Python prepares its device inputs
+before timing. Both return scores to CPU. Run benchmarks sequentially to avoid
+competition for CPU/GPU resources.
+
+JSON output records median, minimum, p95, maximum, loading/first-call timings,
+numerical error, and (for Julia) host allocations. Host allocation bytes are
+not peak memory usage or GPU buffer bytes. Raw runs are stored in ignored
+`artifacts/`; the table above is the versioned summary.
+
+## Earlier measurements and remaining work
 
 On Apple M4, warmed Float32 inference, including CPU score return, measured:
 
