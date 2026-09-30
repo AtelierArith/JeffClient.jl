@@ -383,5 +383,7 @@ include("metal_normalization.jl")
 include("metal_softmax.jl")
 include("metal_rope.jl")
 include("metal_attention.jl")
+include("metal_batch_attention.jl")
+include("metal_batch_forward.jl")
 
 end

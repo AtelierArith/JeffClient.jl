@@ -214,6 +214,12 @@ Detailed findings
 belong in `memories/MEMORY.md`, principles in `AGENTS.md`, and repeated procedures
 in skills.
 
+Remaining Metal tuning work is tracked in GitHub issues:
+
+- [#1: batch performance conditions and configuration/ownership validation](https://github.com/AtelierArith/JeffClient.jl/issues/1)
+- [#2: layer buffer and tensor-data reuse to reduce GPU workspace retention](https://github.com/AtelierArith/JeffClient.jl/issues/2)
+- [#3: remaining kernel submission heap allocations](https://github.com/AtelierArith/JeffClient.jl/issues/3)
+
 ### MLX — alternative investigated, not implemented
 
 MLX is a separate backend, rather than an ONNX execution provider. The official

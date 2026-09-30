@@ -77,3 +77,52 @@ function JeffClient.causal_depthwise(input::Metal.MtlMatrix{Float32}, weight)
     )
     return output
 end
+
+# Columns are contiguous sequences: sample b occupies ((b-1)*length+1):(b*length).
+# A tap may read earlier columns within its sample, never a previous sample.
+function batched_causal_depthwise_kernel!(
+    output,
+    input,
+    weight,
+    channels,
+    columns,
+    sequence_length,
+    kernel,
+)
+    index = Metal.thread_position_in_grid_2d()
+    channel, token = Int32(index.x), Int32(index.y)
+    if channel <= channels && token <= columns
+        first_token = ((token - Int32(1)) ÷ sequence_length) * sequence_length + Int32(1)
+        value = 0.0f0
+        for tap = Int32(1):kernel
+            source_token = token - (kernel - tap)
+            if source_token >= first_token
+                value += input[channel, source_token] * weight[tap, channel]
+            end
+        end
+        output[channel, token] = JeffClient.native_silu(value)
+    end
+    return
+end
+
+function batched_causal_depthwise(input::Metal.MtlMatrix{Float32}, weight, sequence_length)
+    channels, columns = size(input)
+    sequence_length > 0 && columns > 0 && columns % sequence_length == 0 ||
+        throw(ArgumentError("Batch columns must contain complete nonempty sequences."))
+    size(weight, 2) == channels && size(weight, 1) > 0 ||
+        throw(DimensionMismatch("Convolution weights must match input channels."))
+    output = pooled_array(Float32, size(input))
+    launch_cached_kernel!(
+        batched_causal_depthwise_kernel!,
+        output,
+        input,
+        weight,
+        Int32(channels),
+        Int32(columns),
+        Int32(sequence_length),
+        Int32(size(weight, 1));
+        threads = (64, 4),
+        groups = (cld(channels, 64), cld(columns, 4)),
+    )
+    return output
+end

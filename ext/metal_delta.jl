@@ -58,6 +58,124 @@ function delta_recurrent_kernel!(
     return
 end
 
+# One head/sample pair owns an independent zero-initialized recurrent state.
+# Query/key and output keep flattened token columns for shared projections.
+function batched_delta_recurrent_kernel!(
+    output,
+    query,
+    key,
+    value,
+    beta,
+    decay,
+    key_dim,
+    value_dim,
+    value_start,
+    groups,
+    sequence_length,
+    value_heads,
+    ::Val{KEY_VALUES},
+    ::Val{ROWS},
+) where {KEY_VALUES,ROWS}
+    local_index = Metal.thread_position_in_threadgroup_2d()
+    group_index = Metal.threadgroup_position_in_grid_2d()
+    lane = Int32(local_index.x)
+    row = (Int32(group_index.x) - Int32(1)) * Int32(ROWS) + Int32(local_index.y)
+    head_sample = Int32(group_index.y) - Int32(1)
+    head = rem(head_sample, value_heads) + Int32(1)
+    token_offset = (head_sample ÷ value_heads) * sequence_length
+    key_head = cld(head, groups)
+    state = ntuple(_ -> 0.0f0, Val(KEY_VALUES))
+    for local_token = Int32(1):sequence_length
+        token = token_offset + local_token
+        keys = ntuple(Val(KEY_VALUES)) do part
+            component = lane + Int32(32 * (part - 1))
+            component <= key_dim ? key[component, key_head, token] : 0.0f0
+        end
+        queries = ntuple(Val(KEY_VALUES)) do part
+            component = lane + Int32(32 * (part - 1))
+            component <= key_dim ? query[component, key_head, token] : 0.0f0
+        end
+        factor = exp(decay[head, token])
+        state = map(s -> s * factor, state)
+        prediction = warp_sum(sum(map(*, state, keys)))
+        v =
+            row <= value_dim ? value[value_start+(head-Int32(1))*value_dim+row, token] :
+            0.0f0
+        correction = (v - prediction) * beta[head, token]
+        state = map((s, k) -> s + correction * k, state, keys)
+        result = warp_sum(sum(map(*, state, queries)))
+        if lane == 1 && row <= value_dim
+            output[row, head, token] = result
+        end
+    end
+    return
+end
+
+function batched_delta_recurrent(query, key, mixed, beta, decay, cfg, sequence_length)
+    columns = size(mixed, 2)
+    sequence_length > 0 && columns > 0 && columns % sequence_length == 0 ||
+        throw(ArgumentError("Batch columns must contain complete nonempty sequences."))
+    cfg.key_heads > 0 && cfg.value_heads > 0 && cfg.value_heads % cfg.key_heads == 0 ||
+        throw(ArgumentError("Value heads must be a positive multiple of key heads."))
+    0 < cfg.key_dim <= 256 && cfg.value_dim > 0 || throw(
+        ArgumentError(
+            "Batched recurrent widths must be positive and key width at most 256.",
+        ),
+    )
+    size(query) == size(key) == (cfg.key_dim, cfg.key_heads, columns) ||
+        throw(DimensionMismatch("Batched recurrent Q/K shapes must match."))
+    size(beta) == size(decay) == (cfg.value_heads, columns) ||
+        throw(DimensionMismatch("Batched recurrent gate shapes must match."))
+    size(mixed, 1) == 2cfg.key_dim * cfg.key_heads + cfg.value_dim * cfg.value_heads ||
+        throw(DimensionMismatch("Batched recurrent packed channels must match."))
+    output = pooled_array(Float32, (cfg.value_dim, cfg.value_heads, columns))
+    rows = 8
+    if cfg.key_dim == 128
+        launch_cached_kernel!(
+            batched_delta_recurrent_kernel!,
+            output,
+            query,
+            key,
+            mixed,
+            beta,
+            decay,
+            Int32(cfg.key_dim),
+            Int32(cfg.value_dim),
+            Int32(2cfg.key_dim * cfg.key_heads),
+            Int32(cfg.value_heads ÷ cfg.key_heads),
+            Int32(sequence_length),
+            Int32(cfg.value_heads),
+            Val(4),
+            Val(8);
+            threads = (32, rows),
+            groups = (
+                cld(cfg.value_dim, rows),
+                cfg.value_heads * (columns ÷ sequence_length),
+            ),
+        )
+    else
+        threads = (32, rows)
+        groups = (cld(cfg.value_dim, rows), cfg.value_heads * (columns ÷ sequence_length))
+        Metal.@metal threads=threads groups=groups batched_delta_recurrent_kernel!(
+            output,
+            query,
+            key,
+            mixed,
+            beta,
+            decay,
+            Int32(cfg.key_dim),
+            Int32(cfg.value_dim),
+            Int32(2cfg.key_dim * cfg.key_heads),
+            Int32(cfg.value_heads ÷ cfg.key_heads),
+            Int32(sequence_length),
+            Int32(cfg.value_heads),
+            Val(cld(cfg.key_dim, 32)),
+            Val(rows),
+        )
+    end
+    return output
+end
+
 function packed_qk_kernel!(
     output,
     mixed,

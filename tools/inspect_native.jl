@@ -50,6 +50,7 @@ function main()
         "JEFF_METAL_TRIM_PADDING",
         "JEFF_METAL_SHAPE_WORKSPACES",
         "JEFF_METAL_FUSED_DELTA_MASK",
+        "JEFF_METAL_BATCHED",
     )
         println(flag, "=", get(ENV, flag, "0"))
     end

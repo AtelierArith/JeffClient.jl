@@ -77,6 +77,7 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :metal
+            result["metal_batched_enabled"] = get(ENV, "JEFF_METAL_BATCHED", "0") == "1"
             result["metal_workspace_enabled"] = get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1"
             result["metal_packed_mlp_enabled"] =
                 get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1"
@@ -93,6 +94,19 @@ function main()
                     row,
                 ) + 1 for row in axes(inputs["input_ids"], 1)
             ]
+            batched_execution =
+                result["metal_batched_enabled"] &&
+                size(inputs["input_ids"], 1) > 1 &&
+                backend.config.key_dim <= 256 &&
+                backend.config.head_dim <= 4096 &&
+                size(backend.embedding, 1) <= 4096
+            result["metal_batched_execution"] = batched_execution
+            if batched_execution
+                fill!(
+                    result["metal_computed_sequence_lengths"],
+                    maximum(result["metal_computed_sequence_lengths"]),
+                )
+            end
             extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
             isdefined(extension, :metal_pool_stats) &&
                 (result["metal_pool"] = extension.metal_pool_stats())

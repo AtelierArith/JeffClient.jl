@@ -20,6 +20,326 @@ function captured_kernel_handle_probe(value)
     end
 end
 
+function verify_batched_forward_workspace(extension)
+    flags = (
+        "JEFF_METAL_BATCHED",
+        "JEFF_METAL_WORKSPACE",
+        "JEFF_METAL_SHAPE_WORKSPACES",
+        "JEFF_METAL_TRIM_PADDING",
+    )
+    previous = Dict(flag => get(ENV, flag, nothing) for flag in flags)
+    try
+        extension.clear_forward_workspace!()
+        ENV["JEFF_METAL_BATCHED"] = "1"
+        ENV["JEFF_METAL_WORKSPACE"] = "1"
+        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
+        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
+        fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
+        cpu, gpu =
+            NativeBackend(fixture; device = :cpu), NativeBackend(fixture; device = :metal)
+        ids = reshape(mod.(collect(Int64, 0:17), size(gpu.embedding, 2)), 2, 9)
+        masks =
+            (ones(Int64, 2, 9), [0 0 1 1 0 1 1 0 1; 1 0 1 0 1 0 1 1 1], ones(Int64, 2, 9))
+        previous_slots = nothing
+        previous_tensors = nothing
+        for mask in masks
+            inputs = Dict("input_ids" => ids, "attention_mask" => mask)
+            expected, actual = logits(cpu, inputs), logits(gpu, inputs)
+            isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
+                error("Batch workspace scores mismatch.")
+            workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            !workspace.active || error("Batch workspace remained active after readback.")
+            if previous_slots !== nothing
+                length(previous_slots) == length(workspace.slots) &&
+                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                    error("Batch mask values replaced workspace slots.")
+                all(
+                    get(workspace.tensor_data, key, nothing) === value for
+                    (key, value) in previous_tensors
+                ) || error("Batch mask values replaced tensor-data bindings.")
+            end
+            previous_slots, previous_tensors =
+                copy(workspace.slots), copy(workspace.tensor_data)
+            GC.gc(true)
+        end
+        # Different batch sizes exercise slot replacement, followed by reuse.
+        for batch in (3, 3, 2, 2)
+            changed_ids = reshape(
+                mod.(collect(Int64, 0:(batch*9-1)), size(gpu.embedding, 2)),
+                batch,
+                9,
+            )
+            inputs =
+                Dict("input_ids" => changed_ids, "attention_mask" => ones(Int64, batch, 9))
+            isapprox(
+                logits(gpu, inputs),
+                logits(cpu, inputs);
+                atol = 2.0f-4,
+                rtol = 2.0f-4,
+            ) || error("Changed batch shape scores mismatch.")
+            GC.gc(true)
+        end
+    finally
+        extension.clear_forward_workspace!()
+        for flag in flags
+            previous[flag] === nothing ? delete!(ENV, flag) : (ENV[flag] = previous[flag])
+        end
+    end
+    println(
+        "Validated batch forward workspace slots/tensor-data, mask changes, batch sizes and GC.",
+    )
+end
+
+function verify_batched_full_attention(extension)
+    for (width, heads, kv_heads, rotary_dim, sequence_length, batch) in
+        ((4, 2, 1, 4, 3, 3), (7, 3, 3, 2, 9, 2), (256, 8, 2, 64, 9, 2))
+        hidden = 7
+        cfg = (
+            head_dim = width,
+            heads = heads,
+            kv_heads = kv_heads,
+            rotary_dim = rotary_dim,
+            rope_theta = 1.0f7,
+            eps = 1.0f-6,
+        )
+        make_weight(rows, cols) =
+            reshape(sin.(Float32.(1:(rows*cols))), rows, cols) .* 0.1f0
+        attention = (
+            q = make_weight(hidden, 2width * heads),
+            k = make_weight(hidden, width * kv_heads),
+            v = make_weight(hidden, width * kv_heads),
+            out = make_weight(width * heads, hidden),
+            q_norm = cos.(Float32.(1:width)) .* 0.1f0,
+            k_norm = sin.(Float32.(1:width)) .* 0.1f0,
+        )
+        gpu_attention = map(Metal.MtlArray, attention)
+        input = reshape(
+            cos.(Float32.(1:(hidden*sequence_length*batch))),
+            hidden,
+            sequence_length * batch,
+        )
+        mask = Float32[
+            token == sequence_length || (token + sample) % 3 == 0 ? 1 : 0 for
+            sample = 1:batch for token = 1:sequence_length
+        ]
+        expected = hcat(
+            [
+                JeffClient.full_attention(
+                    attention,
+                    input[:, ((sample-1)*sequence_length+1):(sample*sequence_length)],
+                    mask[((sample-1)*sequence_length+1):(sample*sequence_length)],
+                    cfg,
+                ) for sample = 1:batch
+            ]...,
+        )
+        gpu_input, gpu_mask = Metal.MtlArray(input), Metal.MtlArray(mask)
+        for pass = 1:2
+            actual = Array(
+                extension.batched_full_attention(
+                    gpu_attention,
+                    gpu_input,
+                    gpu_mask,
+                    cfg,
+                    sequence_length,
+                ),
+            )
+            isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
+                error("Batched full attention mismatch: $width/$pass.")
+            GC.gc(true)
+        end
+        permutation = vcat(
+            [
+                collect(((sample-1)*sequence_length+1):(sample*sequence_length)) for
+                sample = batch:-1:1
+            ]...,
+        )
+        copyto!(gpu_input, input[:, permutation])
+        copyto!(gpu_mask, mask[permutation])
+        actual = Array(
+            extension.batched_full_attention(
+                gpu_attention,
+                gpu_input,
+                gpu_mask,
+                cfg,
+                sequence_length,
+            ),
+        )
+        isapprox(actual, expected[:, permutation]; atol = 2.0f-4, rtol = 2.0f-4) ||
+            error("Batched attention sample permutation mismatch.")
+    end
+    println(
+        "Validated batched full attention, grouped heads, RoPE, sample permutation and GC.",
+    )
+end
+
+function verify_batched_masked_softmax(extension)
+    for sequence_length in (1, 9, 65), heads in (1, 3), batch in (1, 2, 3)
+        scores = reshape(
+            sin.(Float32.(1:(sequence_length^2*heads*batch))),
+            sequence_length,
+            sequence_length,
+            heads * batch,
+        )
+        mask = ones(Float32, sequence_length * batch)
+        for sample = 1:batch, token = 1:sequence_length
+            mask[(sample-1)*sequence_length+token] =
+                token == sequence_length || (token + sample) % 3 == 0 ? 1.0f0 : 0.0f0
+        end
+        expected = similar(scores)
+        scale = inv(sqrt(128.0f0))
+        for sample = 1:batch, head = 1:heads, query = 1:sequence_length
+            head_sample = (sample - 1) * heads + head
+            values = Float32[
+                key <= query && mask[(sample-1)*sequence_length+key] == 1.0f0 ?
+                scores[key, query, head_sample] * scale : -floatmax(Float32) for
+                key = 1:sequence_length
+            ]
+            values .= exp.(values .- maximum(values))
+            expected[:, query, head_sample] = values ./ sum(values)
+        end
+        gpu_scores, gpu_mask = Metal.MtlArray(scores), Metal.MtlArray(mask)
+        for pass = 1:2
+            actual =
+                Array(extension.batched_masked_softmax(gpu_scores, gpu_mask, 128, heads))
+            isapprox(actual, expected; atol = 2.0f-6, rtol = 2.0f-5) ||
+                error("Batched softmax mismatch: $sequence_length/$heads/$batch/$pass.")
+            GC.gc(true)
+        end
+        if batch > 1
+            mask[1:sequence_length] .= 1.0f0
+            copyto!(gpu_mask, mask)
+            actual =
+                Array(extension.batched_masked_softmax(gpu_scores, gpu_mask, 128, heads))
+            isapprox(
+                actual[:, :, (heads+1):end],
+                expected[:, :, (heads+1):end];
+                atol = 2.0f-6,
+                rtol = 2.0f-5,
+            ) || error("Softmax used another sample's mask.")
+        end
+    end
+    println("Validated batched causal/padding softmax masks and GC.")
+end
+
+function verify_batched_delta_recurrent(extension)
+    for width in (7, 128, 256), sequence_length in (1, 9, 65), batch in (1, 2, 3)
+        heads, value_heads, value_width = 2, 4, 9
+        columns = sequence_length * batch
+        channels = 2width * heads + value_width * value_heads
+        mixed = reshape(sin.(Float32.(1:(channels*columns))), channels, columns)
+        cfg = (
+            key_dim = width,
+            key_heads = heads,
+            value_dim = value_width,
+            value_heads = value_heads,
+        )
+        gpu_mixed = Metal.MtlArray(mixed)
+        gpu_q, gpu_k = extension.packed_qk_pair(gpu_mixed, cfg, columns)
+        q, k = Array(gpu_q), Array(gpu_k)
+        beta = fill(0.5f0, value_heads, columns)
+        decay = reshape(
+            range(-12.0f0, 0.0f0; length = value_heads * columns),
+            value_heads,
+            columns,
+        )
+        gpu_beta, gpu_decay = Metal.MtlArray(beta), Metal.MtlArray(decay)
+        expected = zeros(Float32, value_width, value_heads, columns)
+        for sample = 1:batch, head = 1:value_heads
+            key_head = cld(head, value_heads ÷ heads)
+            state = zeros(Float32, width, value_width)
+            for token = ((sample-1)*sequence_length+1):(sample*sequence_length)
+                query, key = q[:, key_head, token], k[:, key_head, token]
+                state .*= exp(decay[head, token])
+                start = 2width * heads + (head - 1) * value_width
+                v = mixed[(start+1):(start+value_width), token]
+                correction = (v - transpose(state) * key) .* beta[head, token]
+                state .+= key * transpose(correction)
+                expected[:, head, token] = transpose(state) * query
+            end
+        end
+        for pass = 1:2
+            actual = Array(
+                extension.batched_delta_recurrent(
+                    gpu_q,
+                    gpu_k,
+                    gpu_mixed,
+                    gpu_beta,
+                    gpu_decay,
+                    cfg,
+                    sequence_length,
+                ),
+            )
+            isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-4) ||
+                error("Batched recurrent mismatch: $width/$sequence_length/$batch/$pass.")
+            GC.gc(true)
+        end
+        if batch > 1
+            mixed[:, 1:sequence_length] .= 100.0f0
+            copyto!(gpu_mixed, mixed)
+            actual = Array(
+                extension.batched_delta_recurrent(
+                    gpu_q,
+                    gpu_k,
+                    gpu_mixed,
+                    gpu_beta,
+                    gpu_decay,
+                    cfg,
+                    sequence_length,
+                ),
+            )
+            isapprox(
+                actual[:, :, (sequence_length+1):end],
+                expected[:, :, (sequence_length+1):end];
+                atol = 2.0f-5,
+                rtol = 2.0f-4,
+            ) || error("Recurrent state crossed a sample boundary.")
+        end
+    end
+    println("Validated batched recurrent state isolation across widths and GC.")
+end
+
+function verify_batched_causal_depthwise(extension)
+    for channels in (7, 128),
+        sequence_length in (1, 3, 9, 65),
+        batch in (1, 2, 3),
+        taps in (1, 4)
+
+        columns = sequence_length * batch
+        input = reshape(sin.(Float32.(1:(channels*columns))), channels, columns)
+        weight = reshape(cos.(Float32.(1:(taps*channels))), taps, channels)
+        expected = similar(input)
+        for sample = 1:batch
+            range = ((sample-1)*sequence_length+1):(sample*sequence_length)
+            expected[:, range] = JeffClient.causal_depthwise(input[:, range], weight)
+        end
+        gpu_input, gpu_weight = Metal.MtlArray(input), Metal.MtlArray(weight)
+        for pass = 1:2
+            actual = Array(
+                extension.batched_causal_depthwise(gpu_input, gpu_weight, sequence_length),
+            )
+            isapprox(actual, expected; atol = 2.0f-6, rtol = 2.0f-5) || error(
+                "Batched causal convolution mismatch: $channels/$sequence_length/$batch/$taps/$pass.",
+            )
+            GC.gc(true)
+        end
+        if batch > 1
+            # Poison the preceding sample; the following sample must be unchanged.
+            input[:, 1:sequence_length] .= 100.0f0
+            copyto!(gpu_input, input)
+            actual = Array(
+                extension.batched_causal_depthwise(gpu_input, gpu_weight, sequence_length),
+            )
+            isapprox(
+                actual[:, (sequence_length+1):end],
+                expected[:, (sequence_length+1):end];
+                atol = 2.0f-6,
+                rtol = 2.0f-5,
+            ) || error("Convolution crossed a sample boundary.")
+        end
+    end
+    println("Validated batched causal convolution across sample boundaries and GC.")
+end
+
 function verify_fused_delta_mask_workspace(extension)
     flags = (
         "JEFF_METAL_WORKSPACE",
@@ -96,6 +416,15 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    if ARGS == ["batch"]
+        verify_batched_causal_depthwise(extension)
+        verify_batched_delta_recurrent(extension)
+        verify_batched_masked_softmax(extension)
+        verify_batched_full_attention(extension)
+        verify_batched_forward_workspace(extension)
+        return
+    end
+    isempty(ARGS) || error("Usage: verify_metal_primitives.jl [batch]")
     previous_trim = get(ENV, "JEFF_METAL_TRIM_PADDING", nothing)
     try
         reference = Metal.MtlArray(zeros(Float32, 1, 1))
@@ -884,6 +1213,11 @@ function main()
         GC.gc(true)
     end
     println("Validated packed Q/K normalization and direct V recurrent reads.")
+    verify_batched_causal_depthwise(extension)
+    verify_batched_delta_recurrent(extension)
+    verify_batched_masked_softmax(extension)
+    verify_batched_full_attention(extension)
+    verify_batched_forward_workspace(extension)
     verify_fused_delta_mask_workspace(extension)
 end
 

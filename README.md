@@ -422,7 +422,22 @@ retention improvement, without a confirmed latency improvement. Independent
 targets pass. Allocation profiling records 376 rather than 412 KernelState
 objects for B2, consistent with removing 36 launches.
 
-The latest type check reports no JET errors for the six inspected JeffClient
+`JEFF_METAL_BATCHED=1` enables experimental joint GPU execution for multiple
+samples, disabled by default. Convolution, recurrent state, attention masks and
+RoPE positions remain separate per sample. It uses a shared padded length and a
+single workspace; the shape-workspace bank and fused DeltaNet mask setting
+currently apply to the row execution path. B1 and unsupported widths use row
+execution. Initial B2/L512 measurements reduce host allocations to 4,152 but
+take 792 ms, compared with approximately 586 ms for individually trimmed rows.
+The batch computes lengths 512/512 versus 512/256 and retains about 3.53 GB of
+workspace buffers. This experiment is not a faster replacement for mixed-length
+row execution. For equal-length B2/L1, 50-run medians are 22.8 ms batched versus
+43.9 ms row-wise, with 3,947 versus 7,751 host allocations. This short-input
+result does not establish a speedup for longer or differently padded samples.
+Independent 15-case references pass; further performance and
+configuration validation is in progress.
+
+The row-path type check reports no JET errors for the six inspected JeffClient
 and Metal-extension targets; normalization's Bool dispatch is explicitly split.
 
 ```bash

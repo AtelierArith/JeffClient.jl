@@ -39,6 +39,7 @@ native_host(x::AbstractArray) = Array(x)
 native_forward_scope(f, reference) = f()
 native_forward_scope(f, reference, sequence_length) = native_forward_scope(f, reference)
 native_sequence_start(reference, mask, row) = first(axes(mask, 2))
+native_batch_logits(backend, ids, mask) = nothing
 native_mlp_weights(device, gate, up, down) = (; gate, up, down)
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
@@ -368,7 +369,8 @@ end
 
 Compute uncalibrated `(batch, options)` scores from `input_ids` and
 `attention_mask`, each with logical `(batch, sequence)` dimensions. Batches
-are currently processed one sequence at a time. No generation or KV cache is used.
+are processed one sequence at a time by default; the experimental Metal
+`JEFF_METAL_BATCHED=1` path computes samples together. No generation or KV cache is used.
 """
 function logits(backend::NativeBackend, inputs::AbstractDict)
     Set(keys(inputs)) == Set(["input_ids", "attention_mask"]) ||
@@ -385,6 +387,8 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
         throw(ArgumentError("Mask values must be zero or one."))
     all(mask[:, end] .== 1) ||
         throw(ArgumentError("The final position must be active; use left padding."))
+    batched = native_batch_logits(backend, ids, mask)
+    batched === nothing || return batched
     result = Matrix{Float32}(undef, size(ids, 1), size(backend.readout, 2))
     for row in axes(ids, 1)
         first_token = native_sequence_start(backend.embedding, mask, row)
