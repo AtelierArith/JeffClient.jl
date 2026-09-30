@@ -268,7 +268,8 @@ function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered
     end
 end
 
-function mlp_gate_kernel!(gate, up, elements)
+function mlp_gate_kernel!(gate, up)
+    elements = Int32(length(gate))
     index = Int32(Metal.thread_position_in_grid_1d())
     if index <= elements
         @inbounds gate[index] = JeffClient.native_silu(gate[index]) * up[index]
@@ -283,16 +284,13 @@ function JeffClient.native_mlp_gate!(
     size(gate) == size(up) || throw(DimensionMismatch("MLP gate shapes must match."))
     elements = length(gate)
     if elements > 0
-        Metal.@metal threads=256 groups=cld(elements, 256) mlp_gate_kernel!(
-            gate,
-            up,
-            Int32(elements),
-        )
+        Metal.@metal threads=256 groups=cld(elements, 256) mlp_gate_kernel!(gate, up)
     end
     return gate
 end
 
-function residual_add_kernel!(residual, mixed, elements)
+function residual_add_kernel!(residual, mixed)
+    elements = Int32(length(residual))
     index = Int32(Metal.thread_position_in_grid_1d())
     if index <= elements
         @inbounds residual[index] += mixed[index]
@@ -310,7 +308,6 @@ function JeffClient.native_residual_add!(
         Metal.@metal threads=256 groups=cld(elements, 256) residual_add_kernel!(
             residual,
             mixed,
-            Int32(elements),
         )
     end
     return residual

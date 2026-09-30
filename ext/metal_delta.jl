@@ -168,7 +168,9 @@ function packed_qk_pair(mixed, cfg, length)
     return query, key
 end
 
-function delta_gates_kernel!(beta, decay, b, a, a_decay, dt_bias, heads, elements)
+function delta_gates_kernel!(beta, decay, b, a, a_decay, dt_bias)
+    heads = Int32(size(a, 1))
+    elements = Int32(length(a))
     index = Int(Metal.thread_position_in_grid_1d())
     if index <= elements
         head = (index - 1) % heads + 1
@@ -196,14 +198,14 @@ function delta_gates(b, a, a_decay, dt_bias)
             a,
             a_decay,
             dt_bias,
-            Int32(size(a, 1)),
-            Int32(elements),
         )
     end
     return beta, decay
 end
 
-function delta_mask_kernel!(output, input, mask, width, elements)
+function delta_mask_kernel!(output, input, mask)
+    width = Int32(size(input, 1))
+    elements = Int32(length(input))
     index = Int32(Metal.thread_position_in_grid_1d())
     if index <= elements
         token = (index - Int32(1)) ÷ width + Int32(1)
@@ -222,8 +224,6 @@ function delta_masked_input(input, mask)
             output,
             input,
             mask,
-            Int32(size(input, 1)),
-            Int32(elements),
         )
     end
     return output
