@@ -330,3 +330,24 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 実モデル検証は `/private/tmp/jeff-qk-pair-validation.log`。単体verifierにも幅7/128/256・長さ1/9/65のCPU参照比較を追加した。速度・割当の効果はまだ未測定。
 - Q/K一回起動版の独立参照12ケース×3回は合格し、最大logit誤差 `3.361702e-5`。追加の単体検証は `/private/tmp/jeff-qk-pair-primitives.log` に実行する。
 - Q/K一回起動版と既存プリミティブ検証はすべて通った。性能はまだ未測定で、feed Vector再利用版の10,081 allocations / 513,200 bytes / 198.687604 msをこの変更後の測定値として扱わない。
+- Q/K一回起動版の同条件20回は **9,444 allocations / 495,824 bytes / 中央値198.1489375 ms**。直前feed Vector再利用版10,081 / 513,200から637 allocations（約6.3%）/ 17,376 bytes（約3.4%）減。min/p95/max197.5/199.2/199.3 ms。中央値198.687604→198.1489375 msの差から追加速度改善を確定しない。結果は `artifacts/metal-validation/benchmark-metal-qk-pair.json`。型・20回CPU Profile・全割当再採取は `/private/tmp/jeff-qk-pair-profile.log`。
+- Q/K統合後もJET6対象は報告なし。全割当プロファイル9,545件ではpaired Q/K起動584（旧separate 1,219）、mask broadcast821、beta799、decay793、RMS806、residual RMS780、MLP gate776、residual加算769が上位。MPS値Vector/Memoryは上位型リストから消え、tensor-data187件・command buffer199件は残る。kernel/broadcast起動管理が次の削減対象。プロファイル値はBenchmarkTools totalsとは別に扱う。
+- 通常設定の最新値は `artifacts/metal-validation/benchmark-metal-default-qk-pair.json` に測定する。workspace有効時の9,444 allocationsを既定値として報告しない。
+- Q/K統合後の通常設定は **13,213 allocations / 621,344 bytes / 中央値199.7354375 ms**、min/p95197.7/207.3 ms。workspace版との差は3,769 allocations / 125,520 bytes。通常版とworkspace版の速度差は確定しない。
+
+## DeltaNet beta/decay の起動融合候補
+
+- betaのsigmoidとdecayの `a_decay * softplus(a + dt_bias)` を単一の1D Metal kernelで計算する `delta_gates` を追加した。式は従来のscalar helperを共有する。b/a射影は別々のままで、beta/decay出力も別pooled配列を保持する。workspaceでは両出力の管理wrapperも再利用する。
+- 実モデル検証は `/private/tmp/jeff-delta-gates-validation.log`。単体verifierにhead数1/3/16、長さ1/9/65、入力±100、dt_biasとa_decayの変化、GCを含むCPU式比較を追加した。割当・速度の効果はまだ未測定。
+- beta/decay融合候補の独立参照12ケース×3回は合格し、最大logit誤差 `3.361702e-5`。単体検証は `/private/tmp/jeff-delta-gates-primitives.log` に実行する。
+- beta/decay融合のhead数・長さ・入力±100・GCを含む単体検証と既存プリミティブ検証はすべて通った。同条件20回の性能測定を `artifacts/metal-validation/benchmark-metal-delta-gates.json` に保存する。
+- beta/decay融合版は **8,196 allocations / 421,824 bytes / 中央値198.396083 ms**。直前Q/K一回起動版9,444 / 495,824から1,248 allocations（約13.2%）/ 74,000 bytes（約14.9%）減。min/p95/max197.6/199.3/199.6 ms。中央値198.1489375 msに対する追加の速度改善は確認できない。workspace保持bytesは838,434,816→839,024,640（beta/decayのpooled出力を保持するため589,824増）。保持量とheap削減を別指標として扱う。型診断は `/private/tmp/jeff-delta-gates-types.log`。
+- beta/decay融合版もJET6対象はすべて報告なし。20回CPU Profileと全割当の再採取は `/private/tmp/jeff-delta-gates-profile.log`。実行中のプロファイルが現在のkernelを採取できるよう、終了まで次の製品コード変更は行わない。
+- 再採取は完了し、全割当8,261件。旧beta799+decay793に対して融合delta_gatesは308件。残る上位はmask814、RMS803、residual RMS785、residual加算772、MLP gate769、paired Q/K577など。計測間に小さな揺らぎはあるが、狙った2箇所の起動管理割当の削減を確認した。
+
+## DeltaNet mask 乗算の workspace 出力候補
+
+- mask乗算のgeneric broadcastを `delta_masked_input` へ変更する候補を追加した。列ごとのdevice maskを一つのMetal kernelで読み、pooled outputへ保存する。workspace有効時はこの出力のMtlArray/DataRefも再利用する。CPU maskのアップロードは既存PreparedMetalMaskを共有する。
+- 実モデル検証は `/private/tmp/jeff-delta-mask-validation.log`。単体verifierに幅7/128/1024・長さ1/9/65・交互mask・GCを含むCPU乗算との完全一致を追加した。割当・速度と増えるworkspace保持量はまだ未測定。
+- mask専用kernelは独立参照12ケース×3回に合格し、最大logit誤差 `3.361702e-5`。単体検証は `/private/tmp/jeff-delta-mask-primitives.log` に実行する。
+- mask専用kernelを含む単体検証もすべて合格した（同ログ）。mask変更後の性能は未測定であり、READMEのworkspace測定値8,196 allocations / 421,824 bytesは直前のbeta/decay融合版の値として扱う。

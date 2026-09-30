@@ -168,6 +168,67 @@ function packed_qk_pair(mixed, cfg, length)
     return query, key
 end
 
+function delta_gates_kernel!(beta, decay, b, a, a_decay, dt_bias, heads, elements)
+    index = Int(Metal.thread_position_in_grid_1d())
+    if index <= elements
+        head = (index - 1) % heads + 1
+        @inbounds begin
+            beta[index] = JeffClient.native_sigmoid(b[index])
+            decay[index] =
+                a_decay[head] * JeffClient.native_softplus(a[index] + dt_bias[head])
+        end
+    end
+    return
+end
+
+function delta_gates(b, a, a_decay, dt_bias)
+    size(b) == size(a) || throw(DimensionMismatch("Delta gate projections must match."))
+    size(a, 1) == length(a_decay) == length(dt_bias) ||
+        throw(DimensionMismatch("Delta gate head counts must match."))
+    beta = pooled_array(Float32, size(b))
+    decay = pooled_array(Float32, size(a))
+    elements = length(a)
+    if elements > 0
+        Metal.@metal threads=256 groups=cld(elements, 256) delta_gates_kernel!(
+            beta,
+            decay,
+            b,
+            a,
+            a_decay,
+            dt_bias,
+            Int32(size(a, 1)),
+            Int32(elements),
+        )
+    end
+    return beta, decay
+end
+
+function delta_mask_kernel!(output, input, mask, width, elements)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    if index <= elements
+        token = (index - Int32(1)) ÷ width + Int32(1)
+        @inbounds output[index] = input[index] * mask[token]
+    end
+    return
+end
+
+function delta_masked_input(input, mask)
+    size(input, 2) == length(mask) ||
+        throw(DimensionMismatch("Delta mask length must match input columns."))
+    output = pooled_array(Float32, size(input))
+    elements = length(input)
+    if elements > 0
+        Metal.@metal threads=256 groups=cld(elements, 256) delta_mask_kernel!(
+            output,
+            input,
+            mask,
+            Int32(size(input, 1)),
+            Int32(elements),
+        )
+    end
+    return output
+end
+
 function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask, cfg)
     # Keep the stable chunked implementation available for unsupported widths.
     cfg.key_dim > 256 && return invoke(
@@ -179,18 +240,19 @@ function JeffClient.delta_attention(attention, x::Metal.MtlMatrix{Float32}, mask
         cfg,
     )
     length = size(x, 2)
-    masked = x .* reshape(metal_device_mask(x, mask), 1, :)
+    masked = delta_masked_input(x, metal_device_mask(x, mask))
     mixed = JeffClient.causal_depthwise(
         JeffClient.native_linear(attention.qkv, masked),
         attention.conv,
     )
     key_width = cfg.key_dim * cfg.key_heads
     query, key = packed_qk_pair(mixed, cfg, length)
-    beta = JeffClient.native_sigmoid.(JeffClient.native_linear(attention.b, masked))
-    decay =
-        attention.a_decay .* JeffClient.native_softplus.(
-            JeffClient.native_linear(attention.a, masked) .+ attention.dt_bias,
-        )
+    beta, decay = delta_gates(
+        JeffClient.native_linear(attention.b, masked),
+        JeffClient.native_linear(attention.a, masked),
+        attention.a_decay,
+        attention.dt_bias,
+    )
     z = reshape(
         JeffClient.native_linear(attention.z, masked),
         cfg.value_dim,

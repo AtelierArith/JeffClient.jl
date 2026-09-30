@@ -28,6 +28,53 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    for width in (7, 128, 1024), sequence_length in (1, 9, 65)
+        host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
+        mask = Float32.(isodd.(1:sequence_length))
+        actual =
+            Array(extension.delta_masked_input(Metal.MtlArray(host), Metal.MtlArray(mask)))
+        actual == host .* reshape(mask, 1, :) || error("Delta input mask mismatch.")
+        GC.gc(true)
+    end
+    println("Validated delta input masking across widths and lengths.")
+    for heads in (1, 3, 16), sequence_length in (1, 9, 65)
+        a = reshape(
+            5.0f0 .* sin.(Float32.(1:(heads*sequence_length))),
+            heads,
+            sequence_length,
+        )
+        b = reshape(
+            5.0f0 .* cos.(Float32.(1:(heads*sequence_length))),
+            heads,
+            sequence_length,
+        )
+        a[1], b[1] = -100.0f0, -100.0f0
+        a[end], b[end] = 100.0f0, 100.0f0
+        dt_bias = collect(range(-5.0f0, 5.0f0; length = heads + 1))[1:heads]
+        a_decay = -exp.(collect(range(-5.0f0, 5.0f0; length = heads + 1))[1:heads])
+        beta, decay = extension.delta_gates(
+            Metal.MtlArray(b),
+            Metal.MtlArray(a),
+            Metal.MtlArray(a_decay),
+            Metal.MtlArray(dt_bias),
+        )
+        isapprox(
+            Array(beta),
+            JeffClient.native_sigmoid.(b);
+            atol = 2.0f-6,
+            rtol = 2.0f-5,
+        ) || error("Fused delta beta mismatch.")
+        isapprox(
+            Array(decay),
+            a_decay .* JeffClient.native_softplus.(a .+ dt_bias);
+            atol = 2.0f-5,
+            rtol = 2.0f-5,
+        ) || error("Fused delta decay mismatch.")
+        GC.gc(true)
+    end
+    println(
+        "Validated fused delta beta/decay for head counts, lengths, and extreme inputs.",
+    )
     previous_workspace_setting = get(ENV, "JEFF_METAL_WORKSPACE", nothing)
     ENV["JEFF_METAL_WORKSPACE"] = "1"
     try

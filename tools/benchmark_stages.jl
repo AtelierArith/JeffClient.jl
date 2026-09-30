@@ -39,6 +39,24 @@ function delta_input_projections(attention, x)
     )
 end
 
+function packed_qk_separate(extension, mixed, cfg, sequence_length)
+    return (
+        extension.packed_qk(mixed, cfg, sequence_length, 0, sqrt(Float32(cfg.key_dim))),
+        extension.packed_qk(
+            mixed,
+            cfg,
+            sequence_length,
+            cfg.key_dim * cfg.key_heads,
+            1.0f0,
+        ),
+    )
+end
+
+function delta_gates_separate(b, a, a_decay, dt_bias)
+    return JeffClient.native_sigmoid.(b),
+    a_decay .* JeffClient.native_softplus.(a .+ dt_bias)
+end
+
 function delta_recurrent_stage(
     extension,
     query,
@@ -107,11 +125,14 @@ function main()
         cfg.key_dim * cfg.key_heads,
         1.0f0,
     )
-    beta = JeffClient.native_sigmoid.(JeffClient.native_linear(delta.attention.b, masked))
-    decay =
-        delta.attention.a_decay .* JeffClient.native_softplus.(
-            JeffClient.native_linear(delta.attention.a, masked) .+ delta.attention.dt_bias,
-        )
+    b_projection = JeffClient.native_linear(delta.attention.b, masked)
+    a_projection = JeffClient.native_linear(delta.attention.a, masked)
+    beta, decay = extension.delta_gates(
+        b_projection,
+        a_projection,
+        delta.attention.a_decay,
+        delta.attention.dt_bias,
+    )
     gate = reshape(
         JeffClient.native_linear(delta.attention.z, masked),
         cfg.value_dim,
@@ -223,7 +244,42 @@ function main()
             ),
         ),
     )
+    push!(
+        results,
+        measure_stage(
+            "DeltaNet packed Q/K separate",
+            packed_qk_separate,
+            (extension, delta_mixed, cfg, length(ids)),
+        ),
+    )
+    push!(
+        results,
+        measure_stage(
+            "DeltaNet packed Q/K pair",
+            extension.packed_qk_pair,
+            (delta_mixed, cfg, length(ids)),
+        ),
+    )
+    for (name, f) in (
+        ("DeltaNet beta/decay separate", delta_gates_separate),
+        ("DeltaNet beta/decay fused", extension.delta_gates),
+    )
+        push!(
+            results,
+            measure_stage(
+                name,
+                f,
+                (
+                    b_projection,
+                    a_projection,
+                    delta.attention.a_decay,
+                    delta.attention.dt_bias,
+                ),
+            ),
+        )
+    end
     report = Dict(
+        "delta_gates_fused" => true,
         "device" => string(Metal.device().name),
         "julia_version" => string(VERSION),
         "metal_version" => string(pkgversion(Metal)),

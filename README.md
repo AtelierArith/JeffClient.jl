@@ -196,15 +196,15 @@ The Python runs call the original Jeff `forward` with its backbone wrapper,
 readout, and option masking. They use the installed reference DeltaNet and
 convolution implementations, without Flash Linear Attention or causal-conv1d.
 
-Julia Metal's model loading took 2.45 s and its first forward took 11.39 s
+Julia Metal's model loading took 2.14 s and its first forward took 11.45 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 13,850 Julia heap allocations / 638,720 bytes per
+BenchmarkTools measured 13,213 Julia heap allocations / 621,344 bytes per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
 fell from 2.492 s to 0.200 s (~12.4× faster). Allocation counts fell from 2,845,912
-to 13,850 (~99.5%), and Julia heap bytes from 145,768,352 to 638,720 (~99.6%). Device-only buffers
+to 13,213 (~99.5%), and Julia heap bytes from 145,768,352 to 621,344 (~99.6%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -233,6 +233,9 @@ Weight tensor-data reuse and dedicated embedding gather subsequently reduced
 the default path to 13,850 allocations / 638,720 bytes. Its median/minimum/p95/
 maximum were 200/198/207/243 ms. The opt-in workspace measurements are described
 below separately.
+Paired Q/K normalization then reduced the default path to 13,213 allocations /
+621,344 bytes, with a 200 ms median. This measurement uses commit `1156f4a`;
+later beta/decay fusion experiments are not included in these default figures.
 
 The latest free private cache snapshots were 1.71/6.00/4.77 GB after
 trial/full GC/explicit trim. The cache limit is one quarter of recommended
@@ -295,12 +298,15 @@ Detailed observations and intermediate measurements are in
 [memories/MEMORY.md](memories/MEMORY.md).
 An experimental task-local workspace is available with
 `JEFF_METAL_WORKSPACE=1`. It keeps distinct arrays for each intermediate
-allocation position and reuses their MPS tensor-data and result value Vectors
+allocation position and reuses their MPS tensor-data and feed/result value Vectors
 after CPU score readback completes the GPU work. With the dedicated embedding
-gather, the prepared batch-1/length-256 Float32 case measured 10,479 host
-allocations / 529,120 bytes and a 205 ms median over 20 warmed runs. A speed
-improvement has not been established. It retains 393 arrays / 838,434,816
-device-buffer bytes and 199 tensor-data objects; these bytes are separate from
+gather, paired Q/K normalization, and fused delta gates, the prepared
+batch-1/length-256 Float32 case measured 8,196 host allocations / 421,824 bytes
+and a 198 ms median over
+20 warmed runs. An incremental speed
+improvement has not been established. It retains 429 arrays / 839,024,640
+device-buffer bytes, 199 tensor-data objects, and 199 reusable feed Vectors;
+these bytes are separate from
 the free pool and exclude weights and native MPS resources. This option remains
 disabled by default while its lifetime and memory behavior are evaluated.
 To release the current task's workspace references after using it:
