@@ -351,3 +351,21 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 実モデル検証は `/private/tmp/jeff-delta-mask-validation.log`。単体verifierに幅7/128/1024・長さ1/9/65・交互mask・GCを含むCPU乗算との完全一致を追加した。割当・速度と増えるworkspace保持量はまだ未測定。
 - mask専用kernelは独立参照12ケース×3回に合格し、最大logit誤差 `3.361702e-5`。単体検証は `/private/tmp/jeff-delta-mask-primitives.log` に実行する。
 - mask専用kernelを含む単体検証もすべて合格した（同ログ）。mask変更後の性能は未測定であり、READMEのworkspace測定値8,196 allocations / 421,824 bytesは直前のbeta/decay融合版の値として扱う。
+- mask専用kernel版のB1/L256/active101/F32・workspace有効・同期CPU返却込み20回は **7,710 allocations / 391,008 bytes / 中央値197.896167 ms**。直前8,196 / 421,824から486 allocations / 30,816 bytes減。min/p95/max196.358417/198.52825/198.910041 ms。直前中央値198.396083 msとの小差から追加速度改善を確定しない。447配列が857,899,008 device-buffer bytesを保持し、直前839,024,640から18,874,368 bytes増えた。TD/feed Vectorは各199。結果は `artifacts/metal-validation/benchmark-metal-delta-mask.json`。型・CPU Profile・全割当の再採取は `/private/tmp/jeff-delta-mask-profile.log`。
+- 再採取は完了し、JET6対象すべて報告なし。全割当プロファイル7,757件ではmask起動310件（直前generic broadcast814件）となり、狙った箇所の削減を確認した。残る上位はRMS803、residual RMS785、residual加算772、MLP gate769、MPS submit597、paired Q/K577、RMS gate564。kernel launchの引数tuple・KernelState・pipeline Ref等が残る。CPU samplingのkevent待機はGPU実行待ちを含み、kernel内部の遅さや転送時間の内訳はこのProfileから確定できない。
+
+## MLP gate 専用起動候補
+
+- ProfileのMLP gate769件を対象に、既存in-place broadcastをFloat32 MtlMatrix専用kernelへ置き換える候補を追加した。SiLUのscalar helperと既存destinationを共有し、新しいGPU出力配列は作らない。単体verifierに幅7/128/3584、長さ0/1/9/65、入力±100程度、destination identityとGCを含むCPU参照比較を追加。実モデル12ケース×3回の検証ログは `/private/tmp/jeff-mlp-kernel-validation.log`。性能・数値検証はまだ完了していない。
+- 専用MLP gateの実モデル12ケース×3回は合格し、最大logit誤差 `3.361702e-5`。単体検証は `/private/tmp/jeff-mlp-kernel-primitives.log` に実行する。速度・割当の効果はまだ未測定。
+- 単体検証はすべて合格。同条件workspace B1/L256/active101/F32・20回は **7,374 allocations / 357,600 bytes / 中央値193.2450415 ms**。直前mask版7,710 / 391,008から336 allocations / 33,408 bytes減。min/p95/max192.567416/193.940625/194.16175 ms。直前中央値197.896167 msから約2.35%短縮したが、独立反復による再確認はまだない。447配列/857,899,008 bytesのworkspace保持量は増えていない。結果は `artifacts/metal-validation/benchmark-metal-mlp-kernel.json`。JETとProfile再採取は `/private/tmp/jeff-mlp-kernel-profile.log`。
+- JET6対象はすべて報告なし。全割当プロファイルは7,397件で、MLP gate起動409件（旧broadcast769件）に減った。残る上位はRMS803、residual RMS785、residual加算772、MPS submit597。Metal 1.11.1の `src/compiler/execution.jl` は `@nospecialize(args::Tuple)` を渡す起動境界と、毎回作るKernelState・引数Ref・queue操作を持つ。これらの型安定な管理割当はGPU出力配列の再利用だけでは消えず、起動数の融合や引数削減を別に評価する必要がある。
+- 独立プロセスで同条件20回を反復し、**7,374 allocations / 357,600 bytes / 中央値193.361146 ms**、min/p95/max192.701375/194.2895/194.579833 msを得た。最初の193.2450415 msを再現した。結果は `artifacts/metal-validation/benchmark-metal-mlp-kernel-repeat.json`。直前mask版197.896167 msより両測定とも約2.3%短いが、この改善を他の入力・機種に一般化しない。
+
+## 残差加算の専用起動候補
+
+- Profileのresidual加算772件を対象に、`native_residual_add!` のgeneric in-place broadcastとMetal専用kernelを分岐する候補を追加した。既存residualを更新し、新しい出力配列は作らない。単体verifierに幅7/128/1024、長さ0/1/9/65、destination identity、GC、同一配列を両入力に渡すaliasケースを追加した。実モデル検証ログは `/private/tmp/jeff-residual-kernel-validation.log`。性能・検証はまだ完了していない。
+- 実モデル12ケース×3回は合格、最大logit誤差 `3.361702e-5`。generic hook変更のCPU fixture5件も合格、最大 `3.874302e-7`（`/private/tmp/jeff-residual-cpu-validation.log`）。単体検証は `/private/tmp/jeff-residual-kernel-primitives.log` に実行する。性能はまだ未測定。
+- 単体検証も合格。同条件workspace B1/L256/active101/F32・20回は **7,038 allocations / 324,192 bytes / 中央値193.4229585 ms**。直前MLP版7,374 / 357,600から336 allocations / 33,408 bytes減。min/p95/max192.651208/194.013417/194.424167 ms。速度は直前193.2–193.4 msと同程度で、追加改善は確認できない。workspace保持量447配列/857,899,008 bytesは変わらない。結果は `artifacts/metal-validation/benchmark-metal-residual-kernel.json`。JETとProfile再採取は `/private/tmp/jeff-residual-kernel-profile.log`。
+- JET6対象は報告なし。全割当プロファイル7,037件ではresidual加算412件（旧broadcast772件）となり、狙った起動の削減を確認した。残る最大はRMS803、residual RMS785。専用起動でも引数tupleとMetalの起動状態割当は残る。通常設定の再測定ログは `/private/tmp/jeff-default-residual-kernel.log`。
+- 現在の通常設定workspace無効も同条件20回を測定し、**11,185 allocations / 461,808 bytes / 中央値194.878646 ms**、min/p95/max193.15975/201.134125/243.408917 ms。load2.065312667秒、初回forward10.495385417秒（package import除外）。free poolのtrial/GC/trimは1,732,640,768/6,110,314,496/4,765,515,776 bytesで、workspace保持0。結果は `artifacts/metal-validation/benchmark-metal-default-residual-kernel.json`。workspace版7,038 / 324,192と混同しない。Python F32既存測定349.829792 msに対してこの条件では約44%短いが、最適化済みPython kernelや他機種との比較ではない。

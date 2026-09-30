@@ -28,6 +28,38 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    for width in (7, 128, 1024), sequence_length in (0, 1, 9, 65)
+        host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
+        mixed = cos.(host)
+        gpu_host, gpu_mixed = Metal.MtlArray.((host, mixed))
+        result = JeffClient.native_residual_add!(gpu_host, gpu_mixed)
+        result === gpu_host || error("Residual addition must reuse its destination.")
+        Array(result) == host .+ mixed || error("Dedicated residual addition mismatch.")
+        GC.gc(true)
+        JeffClient.native_residual_add!(gpu_host, gpu_host)
+        Array(gpu_host) == 2.0f0 .* (host .+ mixed) ||
+            error("Aliased residual addition mismatch.")
+    end
+    println("Validated in-place residual addition, including aliasing and empty inputs.")
+    for width in (7, 128, 3584), sequence_length in (0, 1, 9, 65)
+        gate = reshape(
+            100.0f0 .* sin.(Float32.(1:(width*sequence_length))),
+            width,
+            sequence_length,
+        )
+        up = reshape(cos.(Float32.(1:(width*sequence_length))), size(gate))
+        gpu_gate, gpu_up = Metal.MtlArray.((gate, up))
+        result = JeffClient.native_mlp_gate!(gpu_gate, gpu_up)
+        result === gpu_gate || error("MLP gate must reuse its destination.")
+        isapprox(
+            Array(result),
+            JeffClient.native_silu.(gate) .* up;
+            atol = 2.0f-5,
+            rtol = 2.0f-5,
+        ) || error("Dedicated MLP gate mismatch.")
+        GC.gc(true)
+    end
+    println("Validated in-place MLP gate across widths, lengths, and extreme inputs.")
     for width in (7, 128, 1024), sequence_length in (1, 9, 65)
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mask = Float32.(isodd.(1:sequence_length))

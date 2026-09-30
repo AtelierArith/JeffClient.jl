@@ -148,9 +148,9 @@ extension methods at that stage.
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
 Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.200 s**, original Python MPS
-**0.350 s**. Julia heap: **13,213 allocations / 621,344 bytes**. This is ~12.4×
-faster than the 2.492 s implementation, with ~99.5% fewer allocations. Loading
+20 warmed synchronized calls: Julia Metal **0.195 s**, original Python MPS
+**0.350 s**. Julia heap: **11,185 allocations / 461,808 bytes**. This is ~12.8×
+faster than the 2.492 s implementation, with ~99.6% fewer allocations. Loading
 and compilation are excluded; readout and CPU score return are included.
 The current implementation passes all 12 real-model cases × 3 passes, including
 GC between cases and disabled scalar indexing. The tiny fixture and primitive
@@ -171,9 +171,10 @@ Fixed-length MPS pointer storage removes the conversion pointer Vector.
 An opt-in task-local workspace now reuses intermediate arrays, their MPS
 tensor-data, and result value Vectors. Dedicated embedding gather avoids GPU
 index bounds checking after validating host IDs. The prepared B1/L256/F32 case
-measured 8,196 allocations / 421,824 bytes / 198 ms after feed Vector reuse,
-paired Q/K launch, and beta/decay fusion, with 429 arrays retaining
-839,024,640 bytes; a latency improvement is not established. Real-model
+measured 7,038 allocations / 324,192 bytes / 193 ms after feed Vector reuse,
+paired Q/K launch, beta/decay fusion, and dedicated mask/MLP/residual kernels, with 447 arrays retaining
+857,899,008 bytes. The preceding MLP revision also reproduced 193 ms in an
+independent 20-run repeat; residual addition reduced allocation further. Real-model
 12-case × 3-pass validation and GC/identity primitive checks pass.
 Next work: workspace lifetime and retention control,
 intermediate lifetimes, MPS feed containers, and true batch execution. Reduce

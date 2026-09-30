@@ -319,6 +319,11 @@ function native_mlp_gate!(gate, up)
 end
 native_prepare_mask(reference, mask) = mask
 
+function native_residual_add!(residual, mixed)
+    residual .+= mixed
+    return residual
+end
+
 function native_layer(layer, x, mask, cfg)
     normalized = native_rms(x, layer.input_norm, cfg.eps)
     mixed =
@@ -331,8 +336,7 @@ function native_layer(layer, x, mask, cfg)
     mlp = native_linear(layer.mlp.down, native_mlp_gate!(gate, up))
     # residual is owned by this layer; its normalization has already consumed
     # the old values, so reuse it for the final sum on the same device queue.
-    residual .+= mlp
-    return residual
+    return native_residual_add!(residual, mlp)
 end
 
 """

@@ -175,6 +175,54 @@ function JeffClient.native_rms(x::Metal.MtlArray{Float32}, weight, eps; centered
     end
 end
 
+function mlp_gate_kernel!(gate, up, elements)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    if index <= elements
+        @inbounds gate[index] = JeffClient.native_silu(gate[index]) * up[index]
+    end
+    return
+end
+
+function JeffClient.native_mlp_gate!(
+    gate::Metal.MtlMatrix{Float32},
+    up::Metal.MtlMatrix{Float32},
+)
+    size(gate) == size(up) || throw(DimensionMismatch("MLP gate shapes must match."))
+    elements = length(gate)
+    if elements > 0
+        Metal.@metal threads=256 groups=cld(elements, 256) mlp_gate_kernel!(
+            gate,
+            up,
+            Int32(elements),
+        )
+    end
+    return gate
+end
+
+function residual_add_kernel!(residual, mixed, elements)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    if index <= elements
+        @inbounds residual[index] += mixed[index]
+    end
+    return
+end
+
+function JeffClient.native_residual_add!(
+    residual::Metal.MtlMatrix{Float32},
+    mixed::Metal.MtlMatrix{Float32},
+)
+    size(residual) == size(mixed) || throw(DimensionMismatch("Residual shapes must match."))
+    elements = length(residual)
+    if elements > 0
+        Metal.@metal threads=256 groups=cld(elements, 256) residual_add_kernel!(
+            residual,
+            mixed,
+            Int32(elements),
+        )
+    end
+    return residual
+end
+
 function l2_normalize(x::Metal.MtlArray{Float32}, factor)
     size(x, 1) > 4096 && return x ./ (sqrt.(sum(abs2, x; dims = 1) .+ 1.0f-6) .* factor)
     # The unweighted specialization never reads this dummy weight argument.
