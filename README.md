@@ -289,6 +289,16 @@ layout copies. Remaining work includes fused residual/MLP operations,
 explicit intermediate release, and reuse of workspace and MPS feed objects.
 Detailed observations and intermediate measurements are in
 [memories/MEMORY.md](memories/MEMORY.md).
+An experimental task-local workspace is available with
+`JEFF_METAL_WORKSPACE=1`. It keeps distinct arrays for each intermediate
+allocation position and reuses their MPS tensor-data and result value Vectors
+after CPU score readback completes the GPU work. With the dedicated embedding
+gather, the prepared batch-1/length-256 Float32 case measured 10,479 host
+allocations / 529,120 bytes and a 205 ms median over 20 warmed runs. A speed
+improvement has not been established. It retains 393 arrays / 838,434,816
+device-buffer bytes and 199 tensor-data objects; these bytes are separate from
+the free pool and exclude weights and native MPS resources. This option remains
+disabled by default while its lifetime and memory behavior are evaluated.
 The latest type check reports no JET errors for the six inspected JeffClient
 and Metal-extension targets; normalization's Bool dispatch is explicitly split.
 

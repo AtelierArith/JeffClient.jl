@@ -6,6 +6,13 @@ import JSON
 import JET
 import Metal
 
+function profile_forwards(backend, inputs, iterations)
+    for _ = 1:iterations
+        logits(backend, inputs)
+    end
+    return nothing
+end
+
 function report_target(name, f, args...)
     println("\n=== ", name, " ===")
     println("Argument types: ", typeof(args))
@@ -97,10 +104,24 @@ function main()
         measured.gctime,
     )
     println("\n=== Warm CPU sampling profile (GPU submission and waiting included) ===")
-    Profile.clear()
-    Profile.@profile logits(backend, inputs)
+    iterations = parse(Int, get(ENV, "JEFF_PROFILE_ITERATIONS", "20"))
+    iterations > 0 || error("JEFF_PROFILE_ITERATIONS must be positive.")
+    println("Profiled warmed forwards: ", iterations)
+    profile_forwards(backend, inputs, 3)
     Metal.synchronize()
-    Profile.print(; format = :flat, sortedby = :count, mincount = 10, C = true)
+    Profile.init(; delay = 0.001)
+    Profile.clear()
+    Profile.@profile profile_forwards(backend, inputs, iterations)
+    Metal.synchronize()
+    Profile.print(;
+        format = :flat,
+        sortedby = :count,
+        mincount = 10,
+        C = true,
+        groupby = :thread,
+    )
+    println("\n=== CPU sampling call tree ===")
+    Profile.print(; format = :tree, maxdepth = 18, mincount = 10, C = false)
     println("\n=== Sampled allocation stacks ===")
     sample_rate = parse(Float64, get(ENV, "JEFF_ALLOC_SAMPLE_RATE", "0.01"))
     0 < sample_rate <= 1 || error("JEFF_ALLOC_SAMPLE_RATE must be in (0, 1].")

@@ -2,10 +2,97 @@ using JeffClient
 using LinearAlgebra
 import Metal
 
+function verify_weight_tensor_owner(extension)
+    host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
+    weight = Metal.MtlArray(host_weight)
+    key = objectid(weight)
+    first_data = nothing
+    for length in (1, 9, 65, 1)
+        input = reshape(cos.(Float32.(1:7length)), 7, length)
+        actual = Array(JeffClient.native_linear(weight, Metal.MtlArray(input)))
+        isapprox(actual, transpose(host_weight) * input; atol = 2.0f-5, rtol = 2.0f-5) ||
+            error("Cached weight linear mismatch.")
+        entry = extension.WEIGHT_TENSOR_CACHE[key]
+        entry[1].value === weight || error("Weight cache owner mismatch.")
+        if first_data === nothing
+            first_data = entry[2]
+        else
+            entry[2] === first_data || error("Weight tensor-data was not reused.")
+        end
+        GC.gc(true)
+    end
+    return key
+end
+
 function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    previous_workspace_setting = get(ENV, "JEFF_METAL_WORKSPACE", nothing)
+    ENV["JEFF_METAL_WORKSPACE"] = "1"
+    try
+        host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
+        weight = Metal.MtlArray(host_weight)
+        previous_array = nothing
+        previous_values = nothing
+        for sequence_length in (9, 9, 1, 1, 65, 65)
+            input = reshape(cos.(Float32.(1:7sequence_length)), 7, sequence_length)
+            device_input = Metal.MtlArray(input)
+            actual = JeffClient.native_forward_scope(weight) do
+                JeffClient.native_host(JeffClient.native_linear(weight, device_input))
+            end
+            isapprox(
+                actual,
+                transpose(host_weight) * input;
+                atol = 2.0f-5,
+                rtol = 2.0f-5,
+            ) || error("Workspace linear mismatch.")
+            workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
+            array = only(workspace.slots)
+            values = workspace.tensor_data[objectid(array)]
+            length(workspace.tensor_data) == 1 || error("Stale workspace tensor-data.")
+            if previous_array !== nothing && size(previous_array) == size(array)
+                array === previous_array || error("Workspace array was not reused.")
+                values === previous_values || error("Result value Vector was not reused.")
+            end
+            previous_array, previous_values = array, values
+            GC.gc(true)
+        end
+    finally
+        if previous_workspace_setting === nothing
+            delete!(ENV, "JEFF_METAL_WORKSPACE")
+        else
+            ENV["JEFF_METAL_WORKSPACE"] = previous_workspace_setting
+        end
+    end
+    println("Validated workspace arrays/result Vectors across length changes and GC.")
+    for width in (7, 128, 1024)
+        host = reshape(sin.(Float32.(1:(width*11))), width, 11)
+        embedding = Metal.MtlArray(host)
+        for ids in (Int64[], Int64[0], Int64[10, 0, 5, 5, 10])
+            actual = Array(JeffClient.native_gather(embedding, ids))
+            actual == host[:, ids .+ 1] || error("Embedding gather mismatch.")
+        end
+        for ids in (Int64[-1], Int64[11], Int64[0, typemax(Int64)])
+            caught = try
+                JeffClient.native_gather(embedding, ids)
+                false
+            catch exception
+                exception isa ArgumentError || rethrow()
+                true
+            end
+            caught || error("Invalid gather ID was accepted.")
+        end
+        GC.gc(true)
+    end
+    println("Validated embedding gather widths, empty/repeated IDs, and invalid IDs.")
+    owner_key = verify_weight_tensor_owner(extension)
+    GC.gc(true)
+    Metal.synchronize()
+    GC.gc(true)
+    !haskey(extension.WEIGHT_TENSOR_CACHE, owner_key) ||
+        error("Dead weight owner remains cached.")
+    println("Validated weight tensor reuse across lengths and owner GC cleanup.")
     maximum_error = 0.0f0
     for heads in (1, 3), transpose_a in ('N', 'T'), transpose_b in ('N', 'T')
         left_shape = transpose_a == 'N' ? (7, 5) : (5, 7)

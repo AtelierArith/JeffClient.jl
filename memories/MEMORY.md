@@ -65,7 +65,9 @@
 
 Cthulhu で確認できたのは、MPS の shape 変換が型安定でも毎回オブジェクトを生成すること。Profile.Allocs で対象を絞り、Cthulhu で呼び出し先と型推論結果を調べ、shape のキャッシュを実装して、その割当を削減した。型不安定性の修正ではなく、具体型のオブジェクト生成を繰り返す処理の修正だった。
 
-shape キャッシュによる割当数の削減は **33,202 → 28,426 回**。その後の feed/result 辞書の修正で **24,048 回**まで減ったが、こちらは別の変更である。heap allocation 全体はまだ解消しておらず、最新の辞書修正では推論時間の改善も確認できていない。Cthulhu は原因調査に役立った診断ツールであり、改善の効果は変更ごとの実測で判断する。
+shape キャッシュによる割当数の削減は **33,202 → 28,426 回**。その後の feed/result 辞書の修正で **24,048 回**まで減ったが、こちらは別の変更である。heap allocation 全体はまだ解消していない。Cthulhu は原因調査に役立った診断ツールであり、改善の効果は変更ごとの実測で判断する。
+
+現時点の結論は「MPS shape の繰り返し生成という一つの原因を特定し、キャッシュで改善した」。後続の融合・in-place 化・FFI 変換の削減・重み tensor-data 再利用まで含む最新測定は **13,992 allocations / 645,648 bytes / 中央値 198.9896875 ms** だが、これを Cthulhu 単独の効果とはしない。残る主な割当元は pooled buffer に付随する DataRef/MtlArray の管理ラッパー、kernel 起動、MPS submission のコンテナ・tensor-data。型が安定していてもこれらは生成されるため、今後も Profile.Allocs と変更前後の測定が必要。
 
 - Cthulhu は型推論結果を見ながら呼び出し先へ降りるために使った。TypedSyntax は結果を元のソースに対応づける表示に使った。これらがコードを自動修正したわけではなく、見つけた割当元をもとに実装を変更した。
 - RoPE 融合後の JET 6 対象は既に報告なしで、Profile.Allocs の MPS feed/result・tensor-data 関連 3 箇所は約 34% を占めていた。この実測を出発点に、Cthulhu の対話的 descent で `MPSGraphTensorData(::MtlArray)` → `convert(MPSShape, reverse(size(matrix)))` へ降りた。
@@ -227,3 +229,62 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - tuple 版は **14,776 allocations / 696,208 bytes / 中央値 203.4739585 ms**。直前の値 Vector＋固定長ポインタ領域版 14,179 / 651,632 より割当が増えたため、値の保持を Vector に戻した。変換用ポインタ Vector の削減は維持する。tuple 化すれば常に割当が減るわけではなく、FFI・GC 保護・queue roots を含む経路で確認する必要がある。増加の正確な内訳は未確定。
 - tuple 版でも JET 6 対象は報告なし。記録は `artifacts/metal-validation/benchmark-metal-tuple-feed.json` と `/private/tmp/jeff-tuple-feed-profile.log`。型安定性だけでは割当の退行を検出できない。
 - 採用する値 Vector＋固定長ポインタ領域版に戻した状態でも JET 6 対象は報告なし。ログは `/private/tmp/jeff-fixed-pointer-types.log`。公開性能表は採用版の 14,179 allocations / 651,632 bytes / 202.7504165 ms に更新した。
+- 次の変更では ProductGraph に固定キーの Ref ポインタ領域を保持し、`NSDictionary dictionaryWithObjects:forKeys:count:` へ値・キーのポインタを直接渡す。値の NSArray 作成を省く。固定キーの元の NSArray は明示的 retain/release を維持し、managed tensor-data の値 Vector も従来どおり queue roots に残す。
+- この直接辞書版は、GC 後の graph 再利用を含む既存プリミティブ検証を通った。ログは `/private/tmp/jeff-direct-dictionary-primitives.log`。実モデル・割当・速度の検証はまだ必要。
+- 直接辞書版の実モデル 12 ケース × 3 回も通り、最大 logit 誤差は `3.361702e-5`。同条件 20 回は **14,179 allocations / 651,632 bytes / 中央値 203.7404165 ms**。min/p95/max は 201.1/241.9/511.6 ms。直前の値 NSArray 経由版と Julia allocation/bytes は同じで、速度改善も確認できない。
+- ソース上は値 NSArray の作成を省いたが、Objective-C 側の割当量は Julia の BenchmarkTools では直接測れない。Julia heap が減った、あるいは native heap の実測値が減ったとは主張しない。pool の trial/GC/trim 後は **1,712,029,696 / 5,996,544,000 / 4,765,515,776 bytes** で直前と同じ。記録は `artifacts/metal-validation/benchmark-metal-direct-dictionary.json` と `/private/tmp/jeff-direct-dictionary-validation.log`。
+
+## 重みの MPS tensor-data の再利用
+
+- Metal の `native_linear` に重み専用の経路を追加し、固定の buffer/shape/dtype を持つ重みの MPSGraphTensorData を再利用する。activation と出力の tensor-data は引き続き毎回生成する。系列長が変わっても重みの物理 shape は変わらない。
+- cache は array objectid をキーにし、所有者の WeakRef と managed tensor-data を保持する。objectid の一致だけでなく所有者の identity を確認する。所有配列の finalizer でエントリを削除し、別の所有者のエントリを誤って消さないよう確認する。
+- 実モデル 12 ケース × 3 回は通り、最大 logit 誤差 `3.361702e-5`。ログは `/private/tmp/jeff-weight-tensor-validation.log`。一時的な重みで linear の数値を確認し、配列が scope を抜けた後に full GC/synchronize/full GC を行って cache エントリが消えることも確認した。
+- 変更後の割当・速度と JET は次に測定する。native tensor-data は buffer のネイティブ所有権を持つため、WeakRef だけでなくエントリ削除まで確認する必要がある。
+- 同条件 20 回で **13,992 allocations / 645,648 bytes / 中央値 198.9896875 ms**。直前の直接辞書版 14,179 / 651,632 から 187 allocations / 5,984 bytes 減で、重み linear 187 回の tensor-data wrapper 生成を省いた数と一致する。min/p95/max は 197.5/216.8/376.0 ms。速度差の再現性は未確認。記録は `artifacts/metal-validation/benchmark-metal-weight-tensor.json`。
+- 再利用版でも JET 6 対象はすべて報告なし。ログは `/private/tmp/jeff-weight-tensor-types.log`。型が確定した wrapper を再利用することで減った割当であり、新たな型不安定性の修正ではない。
+- `tools/verify_metal_primitives.jl` に継続的な検証を追加した。同じ重みで系列長 1/9/65/1 の linear を CPU 参照と比較し、GC を挟んでも同一 tensor-data を再利用することを確認する。重みが関数 scope を抜けた後には full GC・同期・full GC を行い、cache エントリの削除を確認する。追加した検証と既存プリミティブ検証はすべて通った。ログは `/private/tmp/jeff-weight-cache-primitives.log`。
+- 検証追加後の再診断でも JET 6 対象は報告なし。Profile.Allocs 10% は 1,693 サンプルで、`pooled_array` の DataRef/MtlArray 生成 3 箇所が計 513（約 30.3%）、packed Q/K 起動が 141、residual RMS 起動が 85。型別では DataRef 86、RefCounted 51、Atomic 48、MPS tensor-data の Vector 46、tensor-data wrapper 45 サンプルだった。物理 GPU buffer の再利用だけでは管理オブジェクトの生成は消えない。次は同時に生存する中間配列の区別と GPU 完了条件を守る reusable workspace を検討する。サンプル比率は時間比率ではない。ログは `/private/tmp/jeff-weight-cache-profile.log`。
+
+## 中間配列 workspace の試作
+
+- `JEFF_METAL_WORKSPACE=1` で有効になる試作を追加した。task-local な workspace に各 `pooled_array` 呼び出し位置の配列を保持する。同じ shape の異なる位置には別スロットを割り当て、同時に生存する Q/K・residual などを上書きしない。型・shape が一致する次回呼び出しでは MtlArray/DataRef の生成を省く。
+- 一入力行の scope は CPU score の readback まで含み、次行のスロット再利用は GPU 完了後に始める。例外時には同期してから scope を終了する。queue が変われば workspace を交換し、実行経路が短くなれば余った末尾スロットを削除する。CPU と通常の単体 kernel 呼び出しは従来経路を使う。
+- workspace 自体が配列を保持するため、その GPU メモリは free pool 統計に含まれない。割当の減少だけでメモリ全体の改善を判断してはいけない。型診断・速度・保持メモリの測定前には既定で有効にしない。独立参照 12 ケース × 3 回の検証を `/private/tmp/jeff-workspace-validation.log` に実行中。
+- 試作の独立参照 12 ケース × 3 回は完了し、最大 logit 誤差は従来と同じ `3.361702e-5`。GC と系列長変更を含む数値検証は通った。20 回の性能測定は `/private/tmp/jeff-workspace-benchmark.log`、結果の保存先は `artifacts/metal-validation/benchmark-metal-workspace.json`。
+- 同じ B1/L256/F32/101 active tokens、同期・readout・CPU返却込み20回で **11,250 allocations / 556,176 bytes / 中央値 204.7517085 ms**。直前の重み tensor-data 再利用版 13,992 / 645,648 から **2,742 allocations（約19.6%）/ 89,472 bytes（約13.9%）減**。min/p95/max は 197.7/218.0/338.2 ms。直前中央値 198.9896875 ms より速度改善は確認できない。
+- この測定では private pool misses は392、reuses/free bytesは0。配列が workspace に保持されるため、free bytes=0 は GPU メモリを使っていない意味ではない。`metal_pool_stats` に `workspace_arrays` と16KB単位で確保された `workspace_bytes` を追加した。初回測定は追加前なのでこれらの値は未記録。モデル重み・workspace外の配列・native MPS資源・peak/resident memoryはこの値に含まれない。
+- workspace を有効にした状態でも既存 JET 6 対象はすべて報告なし。ログは `/private/tmp/jeff-workspace-types.log`。保持量の統計を追加した再測定は `artifacts/metal-validation/benchmark-metal-workspace-memory.json` に保存する。
+- 再測定は **11,250 allocations / 556,176 bytes / 中央値198.5395415 ms**、min/p95/max196.8/199.3/334.8 ms。workspace は392配列・837,386,240 bytesを保持し、GC/trim後も同じ。free poolは0。速度改善の確証はなく、管理オブジェクトの割当削減は再現した。
+
+### Profile による workspace 版のボトルネック確認
+
+- `tools/inspect_native.jl` の CPU Profile をウォーム推論20回へ拡張し、call treeも出力するようにした（`JEFF_PROFILE_ITERATIONS` で変更可）。`JEFF_ALLOC_SAMPLE_RATE=1` で一推論の全割当を採取した。ログは `/private/tmp/jeff-workspace-profile.log`。JET6対象は報告なし。ウォーム単発のGC時間は0秒で、GC支配を示す証拠はない。
+- 全割当11,359件（profiling自体の影響を含む）は、packed Q/K起動1,219、通常RMS起動803、residual RMS起動770、MLP gate781、residual加算771など。型別ではMPS tensor-data410、値Vector398、VectorのMemory398、MPSCommandBuffer199。workspace導入前に目立ったpooled DataRef/MtlArray生成は上位から消えた。kernel起動・broadcast・MPS submissionに残る管理オブジェクトが次の削減対象。
+- CPU Profileのmain呼び出しは268サンプル、そのうちembedding gather104、`wait_cmdbuf!`101、queueのinflight制限・cleanup待ち95。gatherにはGPUArraysのbounds checkとbroadcastが含まれる。スタックは重なり、各値は加算不可。別スレッドの`__psynch_cvwait`/`kevent`が多数あり、全6,810サンプルをGPU演算時間の割合へ換算しない。Julia/LLVMのコンパイルスタックも一部残り、純粋な定常CPUコストを断定するには再採取が必要。ProfileはGPU kernel内部を計測しない。
+- この結果を受け、workspaceが所有する行列積出力のMPS tensor-dataもcacheする試作を追加した。既存エントリは入力側でも利用できる。buffer/physical shapeが固定のslotだけを登録し、一時reshape wrapperは登録しない。slot交換・末尾削除時には対応するtensor-dataを削除する。数値検証は `/private/tmp/jeff-workspace-tensor-validation.log` に実行中で、割当削減量は未測定。
+- tensor-data再利用版も独立参照12ケース×3回に合格し、最大logit誤差は `3.361702e-5`。系列長変更・GCを挟んだ再利用でも数値が一致した。`metal_pool_stats` に保持する `workspace_tensor_data` 個数を追加した。20回の性能測定を `artifacts/metal-validation/benchmark-metal-workspace-tensor.json` に保存する。
+- tensor-data再利用版の同条件20回は **11,027 allocations / 549,040 bytes / 中央値199.2508335 ms**。workspaceのみの11,250 / 556,176から223 allocations / 7,136 bytes減。199個の出力tensor-dataを保持し、一部は後続入力としても再利用される。min/p95/max197.5/203.9/334.0 msで、直前中央値198.5395415 msに対する速度改善は確認できない。workspace配列は392個・837,386,240 bytesのまま。native tensor-data自体の保持bytesとresident/peak memoryは未測定。
+- Metal 1.11.1の `lib/mpsgraphs/tensor.jl:36` は `initWithMTLBuffer:shape:dataType:` でmanaged MPSGraphTensorDataを生成する。workspace slotが存続する間はbuffer/shape/dtypeが固定なので、内容の更新ごとにwrapperを作り直す必要はない。slot交換・削除時にcacheも削除する。これは固定重みだけでなく、同期条件を守る再利用activationにも適用できる。
+- tensor-data再利用版のJET6対象はすべて報告なし。ログは `/private/tmp/jeff-workspace-tensor-types.log`。
+
+## embedding gather の GPU bounds check
+
+- Profileで目立ったembedding gatherをGPUArraysの `src/host/indexing.jl` で追跡した。vectorized indexingの `checkbounds` はGPU indexに対して `all(broadcast(checkindex,...))` を実行する。CPU側でtoken IDの範囲を検証済みでも、従来経路はGPUへ転送したindexを再検証していた。
+- Float32 Metal embeddingとCPUの整数Vectorに専用gatherを追加した。ID範囲はCPUで検証し、一つのMetal kernelでembeddingを読み取ってpooled outputへ書く。workspace有効時は出力wrapperも再利用する。GPU配列のscalar indexingは使わない。空のID Vectorではkernelを起動せず、無効IDはArgumentErrorにする。
+- 独立参照12ケース×3回を `/private/tmp/jeff-gather-validation.log` に実行中。速度・割当改善はまだ未測定で、bounds checkの除去だけから速度改善を断定しない。
+- 専用gatherの実モデル検証は完了し、12ケース×3回で最大logit誤差 `3.361702e-5`。プリミティブverifierにも幅7/128/1024、空入力、先頭/末尾/重複ID、負のID・vocabulary上限・typemax(Int64)の拒否を追加した。ログは `/private/tmp/jeff-gather-primitives.log`。
+- 追加したgather単体検証と既存プリミティブ検証はすべて通った。20回の同条件性能測定を `artifacts/metal-validation/benchmark-metal-gather.json` に保存する。
+- 同条件20回で **10,877 allocations / 541,856 bytes / 中央値198.9514165 ms**。直前のtensor-data再利用版11,027 / 549,040から150 allocations / 7,184 bytes減。min/p95/max197.5/199.6/200.4 ms。中央値199.2508335 msとの差から速度改善は断定しない。workspaceは393配列・838,434,816 bytes、tensor-data199個を保持する。gather出力を保持するため、workspaceのbytesは1,048,576増えた。
+- 再プロファイルは `/private/tmp/jeff-gather-profile.log`。採取用 `profile_forwards` 自体を3回warmupしてから同じ関数で20回採取するよう修正し、Profile間隔1ms・flat出力のthread別表示を追加した。これにより採取ループの初回コンパイルと別threadの待機を切り分けやすくする。出力の実測確認前にbounds-checkスタックが消えたとは主張しない。
+- 再採取は完了し、JET6対象は報告なし。CPU flat出力（mincount=10）には旧gatherのGPUArrays `checkbounds`/`checkindex`経路が現れなくなった。main推論スタック164サンプル中、`wait_cmdbuf!`100、inflight制限/cleanup待ち91、MPS encode29、Metal kernel launch41。これらは重なる呼び出しで加算不可。thread1のkevent3,086、thread2の条件変数待ち3,286を別表示できた。ProfileはGPU kernel内部を測らず、待機を特定のGPU演算へ帰属させることはできない。
+- 全割当プロファイル10,977件ではpacked Q/K起動1,219、RMS起動803、MLP gate781、residual加算771などが残る。tensor-dataは **410→187** 件となり、workspace cacheによる223件削減と一致する。feed/result値Vector398件とMemory398件、MPSCommandBuffer199件は残る。単発GC時間は0秒。次はkernel起動に伴う管理処理・broadcast起動とMPS feed/result容器の再利用が候補。
+
+## workspace の MPS result 値 Vector 再利用
+
+- workspaceのtensor-data cacheを1要素の `Vector{MPSGraphTensorData}` を保持する形へ変更した。同じ出力slotのMPS submissionでは、tensor-dataに加えてresult値Vectorを再利用する。Vectorを推論中に変更せず、従来どおりqueue rootsにも保持する。feed側は毎回生成する。resultはworkspaceが所有する出力だけを保持し、モデル重みをworkspaceへ追加保持しない。
+- 独立参照12ケース×3回は通り、最大logit誤差 `3.361702e-5`。ログは `/private/tmp/jeff-result-vector-validation.log`。単体verifierへ系列長9/9/1/1/65/65・GC・同じ配列/Vectorのidentity・cacheの古いエントリ削除の確認を追加した。ログは `/private/tmp/jeff-result-vector-primitives.log`。割当と速度はまだ未測定。
+- 追加したworkspace検証と既存プリミティブ検証はすべて通った。20回の同条件性能測定を `artifacts/metal-validation/benchmark-metal-result-vector.json` に保存する。
+- 同条件20回は **10,479 allocations / 529,120 bytes / 中央値204.7490835 ms**。専用gather版10,877 / 541,856から398 allocations / 12,736 bytes減で、199個のresult VectorとそのMemoryを省いた数に一致する。min/p95/max197.5/216.5/230.6 ms。速度改善は確認できない。workspaceは393配列・838,434,816 bytes・tensor-data199個で直前と同じ。型診断は `/private/tmp/jeff-result-vector-types.log`。
+- result Vector再利用版でもJET6対象はすべて報告なし。
+- forward scopeを導入したCPU経路もfixture5入力に合格し、最大誤差 `3.874302e-7`。ログは `/private/tmp/jeff-workspace-cpu-validation.log`。workspace無効の通常Metal経路は `/private/tmp/jeff-default-gather-validation.log` で独立参照検証を実行する。
+- workspace無効の通常Metal経路も12ケース×3回に合格し、最大logit誤差 `3.361702e-5`。通常・workspace両方の数値検証を確認した状態で今回の変更をまとめる。workspaceは引き続きopt-inで、既定有効化や全goalの完了を意味しない。

@@ -168,8 +168,14 @@ peak GPU memory. Completed downloads now trim oversized free caches, while
 late GC returns may exceed the limit until the next trim.
 DeltaNet RMS/SiLU gate fusion and in-place residual/MLP activation are verified.
 Fixed-length MPS pointer storage removes the conversion pointer Vector.
-Next work: reusable workspaces,
-intermediate lifetimes, MPS descriptors, and true batch execution. Reduce
+An opt-in task-local workspace now reuses intermediate arrays, their MPS
+tensor-data, and result value Vectors. Dedicated embedding gather avoids GPU
+index bounds checking after validating host IDs. The prepared B1/L256/F32 case
+measured 10,479 allocations / 529,120 bytes / 205 ms, with 393 arrays retaining
+838,434,816 bytes; a latency improvement is not established. Real-model
+12-case × 3-pass validation and GC/identity primitive checks pass.
+Next work: workspace lifetime and retention control,
+intermediate lifetimes, MPS feed containers, and true batch execution. Reduce
 remaining allocations and measure changes against independent references.
 Detailed findings
 belong in `memories/MEMORY.md`, principles in `AGENTS.md`, and repeated procedures

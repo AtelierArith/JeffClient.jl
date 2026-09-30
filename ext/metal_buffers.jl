@@ -68,7 +68,7 @@ function trim_completed_buffer_pool!()
     return nothing
 end
 
-function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
+function fresh_pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
     queue = objectid(Metal.global_queue(Metal.device()))
     bytes = cld(max(prod(dims) * sizeof(T), 1), BUFFER_PAGE) * BUFFER_PAGE
     key = (queue, T, bytes)
@@ -95,12 +95,92 @@ function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
     return array
 end
 
+# Every allocation position owns a distinct array, even when dimensions match.
+# Keep only the last execution's slots; reuse starts after its CPU readback.
+mutable struct ForwardWorkspace
+    queue::UInt
+    slots::Vector{Any}
+    tensor_data::Dict{UInt,Vector{MPSGraphTensorData}}
+    cursor::Int
+    active::Bool
+end
+
+const FORWARD_WORKSPACE_KEY = :JeffClientMetalForwardWorkspace
+
+function pooled_array(::Type{T}, dims::Dims{N}) where {T,N}
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    if workspace isa ForwardWorkspace && workspace.active
+        workspace.cursor += 1
+        slot = workspace.cursor
+        if slot <= length(workspace.slots)
+            cached = workspace.slots[slot]
+            if cached isa Metal.MtlArray{T,N,Metal.PrivateStorage} && size(cached) == dims
+                return cached
+            end
+        end
+        array = fresh_pooled_array(T, dims)
+        if slot <= length(workspace.slots)
+            pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
+            workspace.slots[slot] = array
+        else
+            push!(workspace.slots, array)
+        end
+        return array
+    end
+    return fresh_pooled_array(T, dims)
+end
+
+function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
+    # Opt in while comparing the prototype's retained memory and allocation cost.
+    get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1" || return f()
+    queue = objectid(Metal.global_queue(Metal.device()))
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    if !(workspace isa ForwardWorkspace) || workspace.queue != queue
+        workspace = ForwardWorkspace(
+            queue,
+            Any[],
+            Dict{UInt,Vector{MPSGraphTensorData}}(),
+            0,
+            false,
+        )
+        task_local_storage(FORWARD_WORKSPACE_KEY, workspace)
+    end
+    workspace.active && return f() # Nested work must keep advancing the outer slots.
+    workspace.cursor = 0
+    workspace.active = true
+    try
+        return f() # The row ends with native_host, which waits for GPU completion.
+    catch
+        Metal.synchronize()
+        rethrow()
+    finally
+        workspace.active = false
+        for slot = (workspace.cursor+1):length(workspace.slots)
+            pop!(workspace.tensor_data, objectid(workspace.slots[slot]), nothing)
+        end
+        resize!(workspace.slots, workspace.cursor)
+    end
+end
+
 function metal_pool_stats()
     queue = objectid(Metal.global_queue(Metal.device()))
+    workspace = get(task_local_storage(), FORWARD_WORKSPACE_KEY, nothing)
+    workspace_arrays = workspace isa ForwardWorkspace ? length(workspace.slots) : 0
+    workspace_bytes =
+        workspace isa ForwardWorkspace ?
+        sum(
+            cld(max(length(array) * sizeof(eltype(array)), 1), BUFFER_PAGE) * BUFFER_PAGE
+            for array in workspace.slots;
+            init = 0,
+        ) : 0
     @lock BUFFER_POOL_LOCK return (
         misses = BUFFER_MISSES[],
         reuses = BUFFER_REUSES[],
         free_bytes = get(BUFFER_POOL_BYTES, queue, 0),
+        workspace_arrays = workspace_arrays,
+        workspace_bytes = workspace_bytes,
+        workspace_tensor_data = workspace isa ForwardWorkspace ?
+                                length(workspace.tensor_data) : 0,
         limit_bytes = get(BUFFER_POOL_LIMITS, queue, 0),
         free_buckets = sort(
             [

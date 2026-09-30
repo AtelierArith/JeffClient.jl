@@ -36,6 +36,7 @@ on_native_device(reference::AbstractArray, x::AbstractArray) =
     copyto!(similar(reference, eltype(x), size(x)), x)
 native_host(x::Array) = x
 native_host(x::AbstractArray) = Array(x)
+native_forward_scope(f, reference) = f()
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
 
@@ -358,14 +359,18 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
         throw(ArgumentError("The final position must be active; use left padding."))
     result = Matrix{Float32}(undef, size(ids, 1), size(backend.readout, 2))
     for row in axes(ids, 1)
-        hidden = native_gather(backend.embedding, vec(ids[row, :]))
-        row_mask = native_prepare_mask(hidden, vec(mask[row, :]))
-        for layer in backend.layers
-            hidden = native_layer(layer, hidden, row_mask, backend.config)
+        scores = native_forward_scope(backend.embedding) do
+            hidden = native_gather(backend.embedding, vec(ids[row, :]))
+            row_mask = native_prepare_mask(hidden, vec(mask[row, :]))
+            for layer in backend.layers
+                hidden = native_layer(layer, hidden, row_mask, backend.config)
+            end
+            # RMS normalizes each column independently; readout needs only the last.
+            hidden =
+                native_rms(hidden[:, end:end], backend.final_norm, backend.config.eps)
+            native_host(native_linear(backend.readout, hidden))
         end
-        # RMS normalizes each column independently; readout needs only the last.
-        hidden = native_rms(hidden[:, end:end], backend.final_norm, backend.config.eps)
-        result[row, :] .= vec(native_host(native_linear(backend.readout, hidden)))
+        result[row, :] .= vec(scores)
     end
     return result
 end
