@@ -18,6 +18,7 @@ using Metal.ObjectiveC.Foundation:
     @autoreleasepool, NSArray, NSDictionary, NSUInteger, nil, retain, release
 
 include("metal_buffers.jl")
+include("metal_kernels.jl")
 
 function JeffClient.native_array(::Val{:metal}, x)
     Metal.functional() || throw(ArgumentError("Metal is not available on this machine."))

@@ -13,6 +13,7 @@
 - 推論処理は Julia で実装する。Metal は optional extension として扱う。
 - `./tools` で Python のライブラリやモデルを利用するときは PythonCall.jl を経由する。
 - 型安定性は `@code_warntype` と JET で調べる。型が安定していても配列や GPU 管理オブジェクトの割当は残るため、割当を別に測定する。
+- Function や Vararg を転送するホットパスでは特殊化の挙動も確認する。必要なら型・引数数のパラメータで特殊化を明示し、型推論結果と実測の割当を併せて判断する。
 - 変更した Julia ファイルは JuliaFormatter で整形する。
 
 ## パフォーマンス

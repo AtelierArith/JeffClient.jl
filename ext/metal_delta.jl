@@ -191,13 +191,17 @@ function delta_gates(b, a, a_decay, dt_bias)
     decay = pooled_array(Float32, size(a))
     elements = length(a)
     if elements > 0
-        Metal.@metal threads=256 groups=cld(elements, 256) delta_gates_kernel!(
+        launch_cached_kernel!(
+            delta_gates_kernel!,
             beta,
             decay,
             b,
             a,
             a_decay,
             dt_bias,
+            ;
+            threads = 256,
+            groups = cld(elements, 256),
         )
     end
     return beta, decay
@@ -220,10 +224,14 @@ function delta_masked_input(input, mask)
     output = pooled_array(Float32, size(input))
     elements = length(input)
     if elements > 0
-        Metal.@metal threads=256 groups=cld(elements, 256) delta_mask_kernel!(
+        launch_cached_kernel!(
+            delta_mask_kernel!,
             output,
             input,
             mask,
+            ;
+            threads = 256,
+            groups = cld(elements, 256),
         )
     end
     return output

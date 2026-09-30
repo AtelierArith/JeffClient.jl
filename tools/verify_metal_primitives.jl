@@ -2,6 +2,24 @@ using JeffClient
 using LinearAlgebra
 import Metal
 
+function kernel_handle_probe!(output)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    if index <= length(output)
+        @inbounds output[index] = 1.0f0
+    end
+    return
+end
+
+function captured_kernel_handle_probe(value)
+    return output -> begin
+        index = Int32(Metal.thread_position_in_grid_1d())
+        if index <= length(output)
+            @inbounds output[index] = value
+        end
+        return
+    end
+end
+
 function verify_weight_tensor_owner(extension)
     host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
     weight = Metal.MtlArray(host_weight)
@@ -28,6 +46,38 @@ function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    probe = Metal.MtlArray(zeros(Float32, 7))
+    extension.launch_cached_kernel!(kernel_handle_probe!, probe; threads = 32, groups = 1)
+    all(==(1.0f0), Array(probe)) || error("Cached kernel probe mismatch.")
+    types = Tuple{typeof(Metal.mtlconvert(probe))}
+    first_kernel = extension.cached_mtlfunction(kernel_handle_probe!, types)
+    GC.gc(true)
+    extension.cached_mtlfunction(kernel_handle_probe!, types) === first_kernel ||
+        error("Kernel handle was not reused after GC.")
+    Core.eval(@__MODULE__, quote
+        function kernel_handle_probe!(output)
+            index = Int32(Metal.thread_position_in_grid_1d())
+            if index <= length(output)
+                @inbounds output[index] = 2.0f0
+            end
+            return
+        end
+    end)
+    Base.invokelatest(
+        extension.launch_cached_kernel!,
+        kernel_handle_probe!,
+        probe;
+        threads = 32,
+        groups = 1,
+    )
+    all(==(2.0f0), Array(probe)) || error("Cached kernel ignored a method update.")
+    for value in (3.0f0, 4.0f0)
+        captured = captured_kernel_handle_probe(value)
+        extension.launch_cached_kernel!(captured, probe; threads = 32, groups = 1)
+        GC.gc(true)
+        all(==(value), Array(probe)) || error("Stateful kernel fallback lost its capture.")
+    end
+    println("Validated kernel handle reuse, GC, and method-update invalidation.")
     Metal.synchronize()
     extension.clear_mps_command_cache!()
     queue = Metal.global_queue(Metal.device())

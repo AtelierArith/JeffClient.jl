@@ -284,7 +284,13 @@ function JeffClient.native_mlp_gate!(
     size(gate) == size(up) || throw(DimensionMismatch("MLP gate shapes must match."))
     elements = length(gate)
     if elements > 0
-        Metal.@metal threads=256 groups=cld(elements, 256) mlp_gate_kernel!(gate, up)
+        launch_cached_kernel!(
+            mlp_gate_kernel!,
+            gate,
+            up;
+            threads = 256,
+            groups = cld(elements, 256),
+        )
     end
     return gate
 end
