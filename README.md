@@ -198,13 +198,13 @@ convolution implementations, without Flash Linear Attention or causal-conv1d.
 
 Julia Metal's model loading took 2.04 s and its first forward took 10.26 s
 (including compilation, excluding package imports); subsequent timing is above.
-BenchmarkTools measured 10,129 Julia heap allocations / 446,384 bytes per
+BenchmarkTools measured 9,130 Julia heap allocations / 399,360 bytes per
 Metal forward; this does not measure GPU buffer bytes. Host profiling includes
 MPS submission, Objective-C calls, array allocation, and synchronization.
 
 Following the Laya-based buffer changes and kernel fusion, median Metal latency
 fell from 2.492 s to 0.195 s (~12.8× faster). Allocation counts fell from 2,845,912
-to 10,129 (~99.6%), and Julia heap bytes from 145,768,352 to 446,384 (~99.7%). Device-only buffers
+to 9,130 (~99.7%), and Julia heap bytes from 145,768,352 to 399,360 (~99.7%). Device-only buffers
 are reused only on their owning queue; queue roots keep their last references
 alive until GPU completion. Shared uploads are not rewritten until a completed
 download or explicit synchronization permits recycling. The product graph
@@ -255,6 +255,10 @@ Reusing compiled handles for MLP gates and DeltaNet gates/masks reduced the
 current default path to 10,129 allocations / 446,384 bytes, with median/minimum/
 p95/maximum 194.9/192.9/201.8/217.4 ms. Handles are invalidated on Julia method
 updates; stateful kernel closures use Metal's usual compiler lookup.
+Extending handle reuse to common RMS widths, depthwise convolution, softmax,
+and attention gates reduced the current default path to 9,130 allocations /
+399,360 bytes, with median/minimum/p95/maximum 194.9/192.1/202.5/233.6 ms.
+Latency remains similar; these changes reduce host management allocations.
 
 The latest free private cache snapshots were 1.73/6.13/4.77 GB after
 trial/full GC/explicit trim. The cache limit is one quarter of recommended
@@ -264,7 +268,8 @@ peak or total resident GPU memory. Shared uploads are limited to 64 MB per queue
 
 A second matched Float32 comparison used batch 2 / length 512 with 512 and 256
 active tokens per row: current Julia Metal with `JEFF_METAL_WORKSPACE=1` measured
-**763 ms**, original Python MPS **1,301 ms** (20 samples each), about 41% less time.
+**765 ms**, original Python MPS **1,301 ms** (20 samples each), about 41% less time.
+Julia measured 10,190 host allocations / 538,400 bytes per forward.
 The workspace holds 447 arrays / 1,766,096,896 device-buffer bytes; these exclude
 weights and native MPS resources. Julia currently processes batch rows sequentially.
 This result supports that specific longer input; other shapes and optimized
@@ -322,7 +327,7 @@ An experimental task-local workspace is available with
 allocation position and reuses their MPS tensor-data and feed/result value Vectors
 after CPU score readback completes the GPU work. With the dedicated embedding
 gather, paired Q/K normalization, fused delta gates, and dedicated mask/MLP/residual kernels, the prepared
-batch-1/length-256 Float32 case measured 5,982 host allocations / 308,768 bytes
+batch-1/length-256 Float32 case measured 4,983 host allocations / 261,744 bytes
 and a 193 ms median over
 20 warmed runs. The preceding MLP optimization's 193 ms latency was also
 reproduced in a separate process; residual addition reduced allocation further
@@ -338,6 +343,8 @@ Using the device arrays' dimensions instead of redundant scalar kernel
 arguments removed another 78 allocations / 2,976 bytes without a latency gain.
 Compiled kernel handle reuse removed another 120 allocations / 1,920 bytes,
 also without an established latency gain.
+Extending handle reuse to common RMS widths and attention helpers removed
+another 999 allocations / 47,024 bytes without an established latency gain.
 It retains 447 arrays / 857,899,008
 device-buffer bytes, 199 tensor-data objects, and 199 reusable feed Vectors;
 these bytes are separate from
