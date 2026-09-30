@@ -491,3 +491,8 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 上記Profileは完了し、JET6対象すべて報告なし、全割当4,112件。**MPSGraphTensorDataの割当は18→0件**となった。KernelState206・MPS command wrapper13は変わらない。残る18件がDeltaNet gated reshapeのmetadataだったことを変更前後の割当記録で確認した。GPU起動数を省く変更ではない。再測定を `artifacts/metal-validation/benchmark-metal-flat-gate-repeat.json` に保存する。
 - 再測定は同じ4,112 / 221,200、中央値193.272063 ms、min/p95/max192.872375/194.479084/194.511208 ms。初回の小さな中央値増加は繰り返されず、速度改善とはしないが、直接出力により不要なwrapperとTD構築を省く変更として採用した。
 - Metal 1.11.1 `src/compiler/execution.jl:467` のKernelStateはlaunchごとにRandom.rand(UInt32)のseed、malloc/exception buffer GPU address、kernel relocation table addressから作られる。206件のstateを単に固定値で共有するとseedやkernel固有addressの意味を変えるため、その再利用は行わない。残る管理割当とGPU実行時間は別に扱い、速度改善には演算融合・行列積のまとめ方なども測定する必要がある。
+
+## Packed MLP projection の段階測定候補
+
+- Layaの `ext/LayaMetalExt.jl:398` のgelu_gate_kernelはpacked projectionの前半・後半を読み、別の半幅outputへgate結果を出す。我々はSiLUなので算術は既存native_siluを使い、同じ配置でgate/up weightを一度結合し1回のMPS積と専用gate kernelで処理する診断候補を `tools/benchmark_stages.jl` に追加した。weight CPU readback/結合/uploadは測定外、候補は追加weight copyを保持しpacked projection＋半幅gate outputの一時bufferを使う。通常実装は変更していない。既存MLPと2e-4許容で数値比較してから同期込み10回の段階測定を行う。結果は `artifacts/metal-validation/stages-packed-mlp.json`、ログは `/private/tmp/jeff-stages-packed-mlp.log`。段階測定は全体forward速度の証明ではない。
+- B1/L256/active101/F32、workspace無効・同期込み10回のMLP単体は従来 **4.3575625 ms / 81 allocations / 3,424 bytes**、packed候補 **3.729979 ms / 75 allocations / 2,640 bytes**で約14.4%短い。embedding直後のhiddenを使う単体比較で、正規化後の実層入力や全24層forwardでは未確認。24倍して全体短縮量と主張しない。実装候補をモデル読み込み時のweight packingと全体forwardへ広げ、独立参照と保持メモリを検証する価値がある。

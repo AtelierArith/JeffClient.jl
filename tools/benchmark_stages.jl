@@ -30,6 +30,32 @@ function mlp_projection(mlp, x)
     return JeffClient.native_linear(mlp.down, JeffClient.native_mlp_gate!(gate, up))
 end
 
+function packed_mlp_gate_kernel!(output, packed)
+    index = Int32(Metal.thread_position_in_grid_1d())
+    width = Int32(size(output, 1))
+    if index <= length(output)
+        row = rem(index - Int32(1), width) + Int32(1)
+        column = div(index - Int32(1), width)
+        source = row + Int32(2) * width * column
+        @inbounds output[index] =
+            JeffClient.native_silu(packed[source]) * packed[source+width]
+    end
+    return
+end
+
+function packed_mlp_projection(extension, packed_weight, down, x)
+    packed = JeffClient.native_linear(packed_weight, x)
+    gate = extension.pooled_array(Float32, (size(packed, 1) ÷ 2, size(x, 2)))
+    extension.launch_cached_kernel!(
+        packed_mlp_gate_kernel!,
+        gate,
+        packed;
+        threads = 256,
+        groups = cld(length(gate), 256),
+    )
+    return JeffClient.native_linear(down, gate)
+end
+
 function delta_input_projections(attention, x)
     return (
         JeffClient.native_linear(attention.qkv, x),
@@ -173,6 +199,17 @@ function main()
         isapprox(probe, reference_recurrent; atol = 2.0f-5, rtol = 2.0f-5) ||
             error("Recurrent threadgroup configuration mismatch.")
     end
+    # Pack once outside timing; this diagnostic retains an extra copy of weights.
+    packed_mlp_weight = Metal.MtlArray(hcat(Array(delta.mlp.gate), Array(delta.mlp.up)))
+    ordinary_mlp = Array(completed_call(mlp_projection, (delta.mlp, hidden)))
+    packed_mlp = Array(
+        completed_call(
+            packed_mlp_projection,
+            (extension, packed_mlp_weight, delta.mlp.down, hidden),
+        ),
+    )
+    isapprox(packed_mlp, ordinary_mlp; atol = 2.0f-4, rtol = 2.0f-4) ||
+        error("Packed MLP projection mismatch.")
     # Isolated, synchronized stage costs diagnose kernels/submission overhead.
     # They are not additive: complete forwards batch operations differently.
     results = [
@@ -188,6 +225,11 @@ function main()
                 (full.attention, hidden, prepared_mask, backend.config),
             ),
             ("MLP projections", mlp_projection, (delta.mlp, hidden)),
+            (
+                "MLP packed gate/up projections",
+                packed_mlp_projection,
+                (extension, packed_mlp_weight, delta.mlp.down, hidden),
+            ),
             (
                 "RMS normalization",
                 JeffClient.native_rms,
