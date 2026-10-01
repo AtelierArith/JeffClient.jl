@@ -9,7 +9,7 @@ function JeffClient.cpu_convolution!(
     input::Matrix{Float32},
     weight::Transpose{Float32,Matrix{Float32}},
 )
-    get(ENV, "JEFF_CPU_SIMD", "0") == "1" || return invoke(
+    JeffClient.cpu_setting(:simd) || return invoke(
         JeffClient.cpu_convolution!,
         Tuple{Any,Any,Any},
         output,

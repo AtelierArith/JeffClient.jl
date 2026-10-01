@@ -10,15 +10,15 @@ function main()
     backend = NativeBackend(ARGS[1])
     BLAS.set_num_threads(8)
     for chunk in (64, 32, 16, 128), workers in (1, 2, 4, 8)
-        withenv(
-            "JEFF_CPU_DELTA_CHUNK_SIZE" => string(chunk),
-            "JEFF_CPU_DELTA_WORKERS" => string(workers),
-            "JEFF_CPU_PARALLEL_HEADS" => "1",
-            "JEFF_CPU_DELTA_WORKSPACE" => "1",
-            "JEFF_CPU_MLP_WORKSPACE" => "1",
-            "JEFF_CPU_VECTOR_MATH" => "1",
-            "JEFF_CPU_TRIM_PADDING" => "1",
-            "JEFF_CPU_FINAL_QUERY" => "1",
+        JeffClient.with_cpu_settings(
+            :delta_chunk_size => string(chunk),
+            :delta_workers => string(workers),
+            :parallel_heads => "1",
+            :delta_workspace => "1",
+            :mlp_workspace => "1",
+            :vector_math => "1",
+            :trim_padding => "1",
+            :final_query => "1",
         ) do
             actual = logits(backend, inputs)
             isapprox(actual, expected; atol = 2e-4, rtol = 2e-4) ||

@@ -1,6 +1,6 @@
 using JeffClient, LinearAlgebra, BenchmarkTools
 import JSON
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 
@@ -50,13 +50,13 @@ function main()
     )
     samples = length(ARGS)>=3 ? parse(Int, ARGS[3]) : 50
     samples >= 3 || error("Use at least 3 samples")
-    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
+    JeffClient.initialize_cpu!()
     backend = NativeBackend(ARGS[1])
     references = JSON.parsefile(ARGS[2])
     sample = first(references isa AbstractDict ? references["cases"] : references)
     ids = Int64.(first(sample["inputs"]["input_ids"]))
     mask = Int64.(first(sample["inputs"]["attention_mask"]))
-    start = get(ENV, "JEFF_CPU_TRIM_PADDING", "0")=="1" ? findfirst(!iszero, mask) : 1
+    start = JeffClient.cpu_setting(:trim_padding) ? findfirst(!iszero, mask) : 1
     hidden = JeffClient.native_gather(backend.embedding, ids[start:end])
     mask = mask[start:end]
     seen = Set{Symbol}()

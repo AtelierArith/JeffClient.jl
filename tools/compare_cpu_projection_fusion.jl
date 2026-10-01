@@ -26,9 +26,9 @@ function main()
         gate_up = (first(backend.layers).mlp.gate, first(backend.layers).mlp.up),
         qkv_z = (first_delta.qkv, first_delta.z),
     )
-    withenv(
-        "JEFF_CPU_PARALLEL_PROJECTIONS" => "1",
-        "JEFF_CPU_PROJECTION_THREAD_SCOPE" => "1",
+    JeffClient.with_cpu_settings(
+        :parallel_projections => "1",
+        :projection_thread_scope => "1",
     ) do
         JeffClient.cpu_projection_scope() do
             for (name, weights) in pairs(groups), n in (1, 101, 256)

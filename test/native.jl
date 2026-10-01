@@ -30,10 +30,10 @@ end
     samples = JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
     matrix(rows) = reduce(vcat, [permutedims(Int64.(row)) for row in rows])
     for parallel in ("0", "1"), mlp in ("0", "1")
-        withenv(
-            "JEFF_CPU_DELTA_WORKSPACE" => "1",
-            "JEFF_CPU_PARALLEL_HEADS" => parallel,
-            "JEFF_CPU_MLP_WORKSPACE" => mlp,
+        JeffClient.with_cpu_settings(
+            :delta_workspace => "1",
+            :parallel_heads => parallel,
+            :mlp_workspace => mlp,
         ) do
             for sample in samples
                 inputs = Dict(name => matrix(rows) for (name, rows) in sample["inputs"])
@@ -67,7 +67,7 @@ end
         actual = JeffClient.cpu_final_full_attention(layer.attention, x, mask, cfg)
         @test actual ≈ expected atol=2e-5 rtol=2e-5
     end
-    withenv("JEFF_CPU_FINAL_QUERY" => "1") do
+    JeffClient.with_cpu_settings(:final_query => "1") do
         for sample in
             JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
             inputs = Dict(
@@ -85,11 +85,11 @@ end
     backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
     samples = JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
     for chunk in (1, 3, 16, 32, 64, 128), workers in (1, 2, 4, 8)
-        withenv(
-            "JEFF_CPU_DELTA_CHUNK_SIZE" => string(chunk),
-            "JEFF_CPU_DELTA_WORKERS" => string(workers),
-            "JEFF_CPU_DELTA_WORKSPACE" => "1",
-            "JEFF_CPU_PARALLEL_HEADS" => "1",
+        JeffClient.with_cpu_settings(
+            :delta_chunk_size => string(chunk),
+            :delta_workers => string(workers),
+            :delta_workspace => "1",
+            :parallel_heads => "1",
         ) do
             for sample in samples
                 inputs = Dict(
@@ -102,10 +102,10 @@ end
             end
         end
     end
-    withenv("JEFF_CPU_DELTA_CHUNK_SIZE" => "0") do
+    JeffClient.with_cpu_settings(:delta_chunk_size => "0") do
         @test_throws ArgumentError JeffClient.cpu_delta_worker_workspace(backend.config, 9)
     end
-    withenv("JEFF_CPU_DELTA_WORKERS" => "0") do
+    JeffClient.with_cpu_settings(:delta_workers => "0") do
         @test_throws ArgumentError JeffClient.cpu_delta_workers(backend.config)
     end
 end
@@ -119,13 +119,13 @@ end
         x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
         mask = ones(Int64, n)
         holes && n > 1 && (mask[1:3:(n-1)] .= 0)
-        expected = withenv("JEFF_CPU_RECURRENT_DELTA" => "0") do
+        expected = JeffClient.with_cpu_settings(:recurrent_delta => "0") do
             JeffClient.delta_attention(attention, x, mask, cfg)
         end
         for parallel in ("0", "1")
-            actual = withenv(
-                "JEFF_CPU_RECURRENT_DELTA" => "1",
-                "JEFF_CPU_PARALLEL_HEADS" => parallel,
+            actual = JeffClient.with_cpu_settings(
+                :recurrent_delta => "1",
+                :parallel_heads => parallel,
             ) do
                 scratch = JeffClient.cpu_delta_workspace(cfg, n)
                 JeffClient.delta_attention(attention, x, mask, cfg, scratch)
@@ -139,7 +139,7 @@ end
     previous_threads = JeffClient.BLAS.get_num_threads()
     try
         JeffClient.BLAS.set_num_threads(1)
-        withenv("JEFF_CPU_PARALLEL_PROJECTIONS" => "1") do
+        JeffClient.with_cpu_settings(:parallel_projections => "1") do
             weight = reshape(sin.(Float32.(1:(64*257))), 64, 257)
             for w in (weight, transpose(permutedims(weight))), n in (1, 65)
                 input = reshape(cos.(Float32.(1:(64*n))), 64, n)
@@ -172,9 +172,9 @@ end
 
 @testset "CPU projection thread policy task-local lifetime" begin
     key = :jeff_cpu_projection_blas_threads
-    withenv(
-        "JEFF_CPU_PARALLEL_PROJECTIONS" => "1",
-        "JEFF_CPU_PROJECTION_THREAD_SCOPE" => "1",
+    JeffClient.with_cpu_settings(
+        :parallel_projections => "1",
+        :projection_thread_scope => "1",
     ) do
         saved = get(task_local_storage(), key, nothing)
         actual = JeffClient.BLAS.get_num_threads()
@@ -215,10 +215,10 @@ end
             mask = ones(Int64, n)
             holes && n > 1 && (mask[1:3:(n-1)] .= 0)
             saved_x, saved_mask = copy(x), copy(mask)
-            expected = withenv("JEFF_CPU_PARALLEL_FULL_HEADS" => "0") do
+            expected = JeffClient.with_cpu_settings(:parallel_full_heads => "0") do
                 JeffClient.full_attention(attention, x, mask, cfg)
             end
-            withenv("JEFF_CPU_PARALLEL_FULL_HEADS" => "1") do
+            JeffClient.with_cpu_settings(:parallel_full_heads => "1") do
                 tasks = [
                     Threads.@spawn JeffClient.full_attention(attention, x, mask, cfg)
                     for _ = 1:2
@@ -246,7 +246,7 @@ end
 
         original = reshape(sin.(Float32.(1:(width*heads*n))), width, heads, n)
         expected = original ./ (sqrt.(sum(abs2, original; dims = 1) .+ 1.0f-6) .* scale)
-        withenv("JEFF_CPU_DELTA_NORM_LOOP" => "1") do
+        JeffClient.with_cpu_settings(:delta_norm_loop => "1") do
             actual = copy(original)
             @test JeffClient.cpu_normalize_delta_heads!(actual, scale) === actual
             @test actual ≈ expected atol=2e-6 rtol=2e-6
@@ -256,7 +256,7 @@ end
         (0.0f0, -0.0f0, Float32(NaN), Float32(Inf), floatmax(Float32), nextfloat(0.0f0))
         original = fill(x, 8, 2, 3)
         expected = original ./ sqrt.(sum(abs2, original; dims = 1) .+ 1.0f-6)
-        actual = withenv("JEFF_CPU_DELTA_NORM_LOOP" => "1") do
+        actual = JeffClient.with_cpu_settings(:delta_norm_loop => "1") do
             JeffClient.cpu_normalize_delta_heads!(copy(original), 1.0f0)
         end
         @test isequal(actual, expected)
@@ -270,10 +270,10 @@ end
     for n in (1, 9, 65, 129), recurrent in ("0", "1"), parallel in ("0", "1")
         x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
         saved = copy(x)
-        withenv(
-            "JEFF_CPU_DELTA_PROJECTION_WORKSPACE"=>"1",
-            "JEFF_CPU_RECURRENT_DELTA"=>recurrent,
-            "JEFF_CPU_PARALLEL_HEADS"=>parallel,
+        JeffClient.with_cpu_settings(
+            :delta_projection_workspace=>"1",
+            :recurrent_delta=>recurrent,
+            :parallel_heads=>parallel,
         ) do
             buffers = JeffClient.cpu_delta_projection_workspace(cfg, n)
             state = JeffClient.cpu_delta_workspace(cfg, n)
@@ -307,7 +307,7 @@ end
     try
         JeffClient.BLAS.set_num_threads(1)
         for parallel in ("0", "1")
-            withenv("JEFF_CPU_PARALLEL_PROJECTIONS" => parallel) do
+            JeffClient.with_cpu_settings(:parallel_projections => parallel) do
                 for n in (1, 9, 65)
                     weight = reshape(sin.(Float32.(1:(512*512))), 512, 512) ./ 512
                     x = reshape(cos.(Float32.(1:(512*n))), 512, n)
@@ -342,7 +342,7 @@ end
             expected = residual .+ JeffClient.native_mlp(mlp, x)
             width = size(mlp.gate, 2)
             buffers = workspace ? (fill(NaN32, width, n), fill(NaN32, width, n)) : nothing
-            withenv("JEFF_CPU_MLP_RESIDUAL_FUSION" => "1") do
+            JeffClient.with_cpu_settings(:mlp_residual_fusion => "1") do
                 @test JeffClient.cpu_mlp_add!(residual, mlp, x, buffers) === residual
                 @test residual ≈ expected atol=2e-5 rtol=2e-5
                 @test x == saved
@@ -351,4 +351,21 @@ end
     finally
         JeffClient.BLAS.set_num_threads(old_threads)
     end
+end
+@testset "Automatic CPU policy and scoped diagnostics" begin
+    settings = JeffClient.cpu_settings()
+    withenv("JEFF_CPU_DELTA_CHUNK_SIZE" => "invalid", "JEFF_CPU_PARALLEL_HEADS" => "0") do
+        @test JeffClient.cpu_settings() == settings
+        @test JeffClient.cpu_delta_chunk_size() == settings.delta_chunk_size
+        @test JeffClient.cpu_setting(:parallel_heads)
+    end
+    JeffClient.with_cpu_settings(:parallel_heads => false) do
+        @test !JeffClient.cpu_setting(:parallel_heads)
+    end
+    @test JeffClient.cpu_settings() == settings
+    @test_throws ErrorException JeffClient.with_cpu_settings(:parallel_heads => false) do
+        error("scope restoration")
+    end
+    @test JeffClient.cpu_settings() == settings
+    @test settings.mlp_workspace && settings.trim_padding
 end

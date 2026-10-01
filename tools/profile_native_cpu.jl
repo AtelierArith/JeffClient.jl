@@ -4,16 +4,16 @@ using InteractiveUtils
 using Profile
 import JSON
 import JET
-if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+if JeffClient.cpu_setting(:portable_vector_math)
     import LoopVectorization
     Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
         error("LoopVectorization extension was not loaded.")
 end
-if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
+if JeffClient.cpu_setting(:octavian_delta)
     import Octavian
 end
 
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
@@ -22,7 +22,7 @@ end
 
 function main()
     length(ARGS) == 2 || error("Usage: profile_native_cpu.jl CHECKPOINT REFERENCE_JSON")
-    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
+    JeffClient.initialize_cpu!()
     sample = only(JSON.parsefile(ARGS[2]))
     inputs = Dict(
         name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for

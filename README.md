@@ -76,20 +76,21 @@ This executes the same real-checkpoint demo on an Apple GPU and prints
 demo's model cache. Python and ONNX export are not required. The first run
 also compiles GPU kernels, so startup takes longer than subsequent inference.
 
-### Faster CPU execution on macOS (optional)
+### Optimized CPU execution
 
-On macOS, an optional CPU configuration uses Apple Accelerate, vector math and
-parallel DeltaNet heads, and skips leading padding (about 186 ms per warmed
-forward for this real 0.8B demo on Apple M4):
+CPU inference automatically chooses its platform configuration; no CPU tuning
+environment variables are needed. Apple Silicon macOS uses Accelerate;
+Intel and other platforms use portable vector math and Julia-parallel
+projections. The BLAS thread count is set automatically when JeffClient loads
+(this affects other BLAS users in the same process). Start Julia with multiple
+workers to enable parallel kernels:
 
 ```bash
 julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
-JEFF_CPU_PARALLEL_HEADS=1 JEFF_CPU_MLP_WORKSPACE=1 JEFF_CPU_VECTOR_MATH=1 \
-JEFF_CPU_ACCELERATE=1 JEFF_CPU_TRIM_PADDING=1 \
 julia --threads=8 --project=tools examples/native_inference.jl
 ```
 
-This runs on CPU without Metal. See the performance page for conditions.
+This runs on CPU without Metal or MKL. See the performance page for conditions.
 
 ## Documentation
 

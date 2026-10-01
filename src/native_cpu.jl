@@ -31,8 +31,7 @@ function cpu_projection_blas_threads()
 end
 
 function cpu_projection_scope(f::F) where {F}
-    if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
-       get(ENV, "JEFF_CPU_PROJECTION_THREAD_SCOPE", "0") != "1"
+    if !cpu_setting(:parallel_projections) || !cpu_setting(:projection_thread_scope)
         return f()
     end
     # Immutable policy owned by this task/forward, restored by Base even on
@@ -58,7 +57,7 @@ end
 
 function native_full_heads!(out::Matrix{Float32}, q, k, v, qgate, scores_mask, cfg)
     workers = min(Threads.nthreads(:default), cfg.heads)
-    if get(ENV, "JEFF_CPU_PARALLEL_FULL_HEADS", "0") != "1" ||
+    if !cpu_setting(:parallel_full_heads) ||
        workers <= 1 ||
        size(out, 2) < 16 ||
        cpu_projection_blas_threads() != 1
@@ -102,7 +101,7 @@ function cpu_projection!(output, weight, input, beta = 0.0f0)
         return output
     end
     workers = min(Threads.nthreads(:default), size(output, 1))
-    if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
+    if !cpu_setting(:parallel_projections) ||
        workers == 1 ||
        size(output, 1) < 256 ||
        length(output) * size(input, 1) < 1_000_000 ||
@@ -122,8 +121,7 @@ function cpu_projection!(output, weight, input, beta = 0.0f0)
 end
 
 function native_linear(weight::AbstractMatrix{Float32}, x::Matrix{Float32})
-    get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") == "1" ||
-        return native_matmul(transpose(weight), x)
+    cpu_setting(:parallel_projections) || return native_matmul(transpose(weight), x)
     output = Matrix{Float32}(undef, size(weight, 2), size(x, 2))
     return cpu_projection!(output, weight, x)
 end
@@ -135,7 +133,7 @@ function native_mlp(mlp, x::Matrix{Float32})
 end
 
 function cpu_mlp_workspace(layers, sequence_length)
-    get(ENV, "JEFF_CPU_MLP_WORKSPACE", "0") == "1" || return nothing
+    cpu_setting(:mlp_workspace) || return nothing
     width = size(first(layers).mlp.gate, 2)
     all(layer -> size(layer.mlp.gate, 2) == width, layers) || return nothing
     return (
@@ -156,7 +154,7 @@ function native_mlp(mlp, x::Matrix{Float32}, buffers::Tuple)
 end
 
 function cpu_mlp_add!(residual, mlp, x, buffers)
-    get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1" ||
+    cpu_setting(:mlp_residual_fusion) ||
         return native_residual_add!(residual, native_mlp(mlp, x, buffers))
     # The residual belongs to this layer. Gate/up remain private workspace;
     # beta=1 accumulates the down projection without a temporary output.
@@ -220,21 +218,20 @@ cpu_delta_state_product!(output, state, rhs, alpha, beta) =
     mul!(output, state, rhs, alpha, beta)
 
 function cpu_delta_chunk_size()
-    size = parse(Int, get(ENV, "JEFF_CPU_DELTA_CHUNK_SIZE", "64"))
+    size = cpu_setting(:delta_chunk_size)
     size > 0 || throw(ArgumentError("Delta chunk size must be positive."))
     return size
 end
 
 function cpu_delta_workers(cfg)
-    requested =
-        parse(Int, get(ENV, "JEFF_CPU_DELTA_WORKERS", string(Threads.nthreads(:default))))
+    requested = cpu_setting(:delta_workers)
     requested > 0 || throw(ArgumentError("Delta worker count must be positive."))
     return min(requested, Threads.nthreads(:default), cfg.value_heads)
 end
 
 function cpu_delta_worker_workspace(cfg, sequence_length)
     requested_chunk_size = cpu_delta_chunk_size()
-    chunk_size = get(ENV, "JEFF_CPU_RECURRENT_DELTA", "0") == "1" ? 1 : requested_chunk_size
+    chunk_size = cpu_setting(:recurrent_delta) ? 1 : requested_chunk_size
     full_size = min(chunk_size, sequence_length)
     full = cpu_delta_buffers(cfg, full_size)
     tail_size = mod(sequence_length, chunk_size)
@@ -244,13 +241,13 @@ function cpu_delta_worker_workspace(cfg, sequence_length)
 end
 
 function cpu_delta_workspace(cfg, sequence_length)
-    get(ENV, "JEFF_CPU_DELTA_WORKSPACE", "0") == "1" || return nothing
-    workers = get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1" ? cpu_delta_workers(cfg) : 1
+    cpu_setting(:delta_workspace) || return nothing
+    workers = cpu_setting(:parallel_heads) ? cpu_delta_workers(cfg) : 1
     return [cpu_delta_worker_workspace(cfg, sequence_length) for _ = 1:workers]
 end
 
 function cpu_normalize_delta_heads!(values::Array{Float32,3}, multiplier::Float32)
-    if get(ENV, "JEFF_CPU_DELTA_NORM_LOOP", "0") != "1"
+    if !cpu_setting(:delta_norm_loop)
         values ./= sqrt.(sum(abs2, values; dims = 1) .+ 1.0f-6) .* multiplier
         return values
     end
@@ -268,7 +265,7 @@ function cpu_normalize_delta_heads!(values::Array{Float32,3}, multiplier::Float3
 end
 
 function cpu_delta_projection_workspace(cfg, n)
-    get(ENV, "JEFF_CPU_DELTA_PROJECTION_WORKSPACE", "0") == "1" || return nothing
+    cpu_setting(:delta_projection_workspace) || return nothing
     key_width = cfg.key_dim * cfg.key_heads
     value_width = cfg.value_dim * cfg.value_heads
     return (
@@ -363,25 +360,28 @@ function delta_attention(
 )
     q, k, v, z, beta, decay, out = cpu_delta_prepare(attention, x, mask, cfg, projections)
     groups = cfg.value_heads ÷ cfg.key_heads
-    inplace_rms = get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
-    if get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1" && Threads.nthreads(:default) > 1
+    inplace_rms = cpu_setting(:inplace_delta_rms)
+    if cpu_setting(:parallel_heads) && Threads.nthreads(:default) > 1
         workers = cpu_delta_workers(cfg)
+        settings = cpu_settings()
         @sync for worker = 1:workers
-            Threads.@spawn cpu_delta_heads!(
-                worker:workers:cfg.value_heads,
-                out,
-                q,
-                k,
-                v,
-                beta,
-                decay,
-                z,
-                attention,
-                cfg,
-                groups,
-                inplace_rms,
-                workspace === nothing ? nothing : workspace[worker],
-            )
+            Threads.@spawn with_cpu_settings(settings) do
+                cpu_delta_heads!(
+                    worker:workers:cfg.value_heads,
+                    out,
+                    q,
+                    k,
+                    v,
+                    beta,
+                    decay,
+                    z,
+                    attention,
+                    cfg,
+                    groups,
+                    inplace_rms,
+                    workspace === nothing ? nothing : workspace[worker],
+                )
+            end
         end
     else
         cpu_delta_heads!(
@@ -422,7 +422,7 @@ function cpu_delta_heads!(
     sequence_length = size(out, 2)
     owned =
         workspace === nothing ? cpu_delta_worker_workspace(cfg, sequence_length) : workspace
-    if get(ENV, "JEFF_CPU_RECURRENT_DELTA", "0") == "1"
+    if cpu_setting(:recurrent_delta)
         return cpu_delta_recurrent_heads!(
             heads,
             out,
@@ -723,7 +723,7 @@ function cpu_hidden_forward(
     mixed =
         layer.attention.kind == :full ?
         (
-            get(ENV, "JEFF_CPU_FINAL_QUERY", "0") == "1" ?
+            cpu_setting(:final_query) ?
             cpu_final_full_attention(layer.attention, normalized, mask, cfg) :
             full_attention(layer.attention, normalized, mask, cfg)
         ) :

@@ -1,6 +1,6 @@
 using JeffClient, InteractiveUtils
 import Cthulhu, TypedSyntax, JSON
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 
@@ -25,7 +25,7 @@ function main()
             "JULIA_REVISE_POLL",
         ])
         for key in collect(keys(ENV))
-            (key in allowed || startswith(key, "JEFF_CPU_")) || delete!(ENV, key)
+            key in allowed || delete!(ENV, key)
         end
     end
     backend = NativeBackend(ARGS[1])

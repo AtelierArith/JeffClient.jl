@@ -24,10 +24,10 @@ function eligible_up(values)
 end
 
 function JeffClient.cpu_portable_silu!(output::Matrix{Float32})
-    get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1" || return false
+    JeffClient.cpu_setting(:portable_vector_math) || return false
     isempty(output) && return true
     if !eligible_silu(output)
-        get(ENV, "JEFF_CPU_VECTOR_MATH_BLOCKS", "0") == "1" || return false
+        JeffClient.cpu_setting(:vector_math_blocks) || return false
         for first = 1:256:length(output)
             last = min(first + 255, length(output))
             if eligible_silu(output, first:last)
@@ -49,7 +49,7 @@ function JeffClient.cpu_portable_silu!(output::Matrix{Float32})
 end
 
 function JeffClient.cpu_portable_gate!(gate::Matrix{Float32}, up::Matrix{Float32})
-    get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1" || return false
+    JeffClient.cpu_setting(:portable_vector_math) || return false
     size(gate) == size(up) || return false
     Base.mightalias(gate, up) && return false
     isempty(gate) && return true

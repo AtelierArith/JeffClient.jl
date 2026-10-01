@@ -23,7 +23,7 @@ function main()
     expected = copy(output)
     JeffClient.cpu_convolution!(expected, input, weight)
     for method in (:scalar_simd, :explicit_simd, :turbo)
-        withenv("JEFF_CPU_SIMD" => (method == :explicit_simd ? "1" : "0")) do
+        JeffClient.with_cpu_settings(:simd => (method == :explicit_simd ? "1" : "0")) do
             operation =
                 method == :turbo ? () -> turbo_convolution!(output, input, coefficients) :
                 () -> (fill!(output, 0); JeffClient.cpu_convolution!(output, input, weight))

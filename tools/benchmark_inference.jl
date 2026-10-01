@@ -3,23 +3,23 @@ using JeffClient
 using LinearAlgebra
 using Profile
 import JSON
-if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+if JeffClient.cpu_setting(:portable_vector_math)
     import LoopVectorization
     Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
         error("LoopVectorization extension was not loaded; run Pkg.resolve().")
 end
-if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
+if JeffClient.cpu_setting(:octavian_delta)
     import Octavian
     Base.get_extension(JeffClient, :JeffClientOctavianExt) === nothing &&
         error("Octavian extension was not loaded; run Pkg.resolve() before benchmarking.")
 end
-if get(ENV, "JEFF_CPU_SIMD", "0") == "1"
+if JeffClient.cpu_setting(:simd)
     import SIMD
     Base.get_extension(JeffClient, :JeffClientSIMDExt) === nothing &&
         error("SIMD extension was not loaded; run Pkg.resolve() before benchmarking.")
 end
 
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
@@ -55,13 +55,7 @@ function main()
         Metal.functional() || error("A functional Apple GPU is required.")
         Metal.allowscalar(false)
     end
-    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
-    # Apply backend overrides after general BLAS setup. Accelerate 0.7 only
-    # selects single-threaded (1) or automatic multithreading (anything else).
-    if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1" &&
-       haskey(ENV, "JEFF_CPU_ACCELERATE_THREADS")
-        AppleAccelerate.set_num_threads(parse(Int, ENV["JEFF_CPU_ACCELERATE_THREADS"]))
-    end
+    JeffClient.initialize_cpu!()
     references = JSON.parsefile(ARGS[3])
     cases = references isa AbstractDict ? references["cases"] : references
     sample = cases[index]
@@ -107,51 +101,46 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_policy"] =
+                JeffClient.cpu_setting(:accelerate) ? "apple_accelerate" : "portable"
             result["cpu_mlp_residual_fusion_enabled"] =
-                get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1"
+                JeffClient.cpu_setting(:mlp_residual_fusion)
             result["cpu_delta_projection_workspace_enabled"] =
-                get(ENV, "JEFF_CPU_DELTA_PROJECTION_WORKSPACE", "0") == "1"
+                JeffClient.cpu_setting(:delta_projection_workspace)
             result["cpu_vector_math_blocks_enabled"] =
-                get(ENV, "JEFF_CPU_VECTOR_MATH_BLOCKS", "0") == "1"
-            result["cpu_delta_norm_loop_enabled"] =
-                get(ENV, "JEFF_CPU_DELTA_NORM_LOOP", "0") == "1"
+                JeffClient.cpu_setting(:vector_math_blocks)
+            result["cpu_delta_norm_loop_enabled"] = JeffClient.cpu_setting(:delta_norm_loop)
             result["cpu_parallel_full_heads_enabled"] =
-                get(ENV, "JEFF_CPU_PARALLEL_FULL_HEADS", "0") == "1"
+                JeffClient.cpu_setting(:parallel_full_heads)
             result["cpu_projection_thread_scope_enabled"] =
-                get(ENV, "JEFF_CPU_PROJECTION_THREAD_SCOPE", "0") == "1"
+                JeffClient.cpu_setting(:projection_thread_scope)
             result["cpu_parallel_projections_enabled"] =
-                get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") == "1"
+                JeffClient.cpu_setting(:parallel_projections)
             result["model_retained_julia_bytes"] = Base.summarysize(backend)
             # Process high-water mark includes startup/loading/compilation, not
             # only the warmed inference; it is not cumulative Julia heap bytes.
             result["process_peak_rss_bytes"] = Sys.maxrss()
             result["cpu_portable_vector_math_enabled"] =
-                get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
-            result["cpu_recurrent_delta_enabled"] =
-                get(ENV, "JEFF_CPU_RECURRENT_DELTA", "0") == "1"
-            result["cpu_octavian_delta_enabled"] =
-                get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
-            result["cpu_final_query_enabled"] = get(ENV, "JEFF_CPU_FINAL_QUERY", "0") == "1"
-            result["cpu_simd_enabled"] = get(ENV, "JEFF_CPU_SIMD", "0") == "1"
-            result["cpu_parallel_heads_enabled"] =
-                get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1"
+                JeffClient.cpu_setting(:portable_vector_math)
+            result["cpu_recurrent_delta_enabled"] = JeffClient.cpu_setting(:recurrent_delta)
+            result["cpu_octavian_delta_enabled"] = JeffClient.cpu_setting(:octavian_delta)
+            result["cpu_final_query_enabled"] = JeffClient.cpu_setting(:final_query)
+            result["cpu_simd_enabled"] = JeffClient.cpu_setting(:simd)
+            result["cpu_parallel_heads_enabled"] = JeffClient.cpu_setting(:parallel_heads)
             result["julia_worker_threads"] = Threads.nthreads(:default)
-            result["cpu_mlp_workspace_enabled"] =
-                get(ENV, "JEFF_CPU_MLP_WORKSPACE", "0") == "1"
-            result["cpu_delta_workspace_enabled"] =
-                get(ENV, "JEFF_CPU_DELTA_WORKSPACE", "0") == "1"
+            result["cpu_mlp_workspace_enabled"] = JeffClient.cpu_setting(:mlp_workspace)
+            result["cpu_delta_workspace_enabled"] = JeffClient.cpu_setting(:delta_workspace)
             result["cpu_delta_chunk_size"] = JeffClient.cpu_delta_chunk_size()
             result["cpu_delta_workers"] = JeffClient.cpu_delta_workers(backend.config)
             result["cpu_inplace_delta_rms_enabled"] =
-                get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
-            result["cpu_vector_math_enabled"] = get(ENV, "JEFF_CPU_VECTOR_MATH", "0") == "1"
-            result["cpu_accelerate_requested"] = get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+                JeffClient.cpu_setting(:inplace_delta_rms)
+            result["cpu_vector_math_enabled"] = JeffClient.cpu_setting(:vector_math)
+            result["cpu_accelerate_requested"] = JeffClient.cpu_setting(:accelerate)
             if result["cpu_accelerate_requested"]
                 result["accelerate_version"] = string(pkgversion(AppleAccelerate))
                 result["accelerate_threads"] = AppleAccelerate.get_num_threads()
             end
-            result["cpu_trim_padding_enabled"] =
-                get(ENV, "JEFF_CPU_TRIM_PADDING", "0") == "1"
+            result["cpu_trim_padding_enabled"] = JeffClient.cpu_setting(:trim_padding)
             result["cpu_computed_sequence_lengths"] = [
                 size(inputs["input_ids"], 2) - JeffClient.native_sequence_start(
                     backend.embedding,

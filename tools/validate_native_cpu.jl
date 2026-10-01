@@ -1,6 +1,6 @@
 using JeffClient, LinearAlgebra
 import JSON
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 BLAS.set_num_threads(8)

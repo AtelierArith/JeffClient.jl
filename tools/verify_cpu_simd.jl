@@ -13,7 +13,7 @@ using SIMD, JeffClient, Test
         end
         original = copy(input)
         actual = similar(expected)
-        withenv("JEFF_CPU_SIMD" => "1") do
+        JeffClient.with_cpu_settings(:simd => "1") do
             JeffClient.cpu_convolution!(actual, input, weight)
         end
         @test actual == expected

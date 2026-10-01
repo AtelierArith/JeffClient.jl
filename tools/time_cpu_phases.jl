@@ -1,9 +1,9 @@
 using JeffClient, LinearAlgebra, Statistics
 import JSON
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     import AppleAccelerate
 end
-if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+if JeffClient.cpu_setting(:portable_vector_math)
     import LoopVectorization
     @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 end
@@ -46,7 +46,7 @@ function phase_layer(
         JeffClient.cpu_projection!(up, layer.mlp.up, normalized)
     end
     activation = @timed JeffClient.cpu_owned_mlp_gate!(gate, up)
-    fused = get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1"
+    fused = JeffClient.cpu_setting(:mlp_residual_fusion)
     down = @timed if fused
         JeffClient.cpu_projection!(residual, layer.mlp.down, activation.value, 1.0f0)
     else
@@ -93,7 +93,7 @@ end
 
 function main()
     length(ARGS) == 2 || error("Usage: time_cpu_phases.jl CHECKPOINT REFERENCE")
-    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
+    JeffClient.initialize_cpu!()
     backend = NativeBackend(ARGS[1])
     sample = only(JSON.parsefile(ARGS[2]))
     ids = Int64.(only(sample["inputs"]["input_ids"]))

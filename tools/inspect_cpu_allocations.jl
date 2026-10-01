@@ -3,7 +3,7 @@
 push!(LOAD_PATH, dirname(@__DIR__))
 using AllocCheck, JeffClient, LinearAlgebra
 import JSON
-get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1" && (@eval import AppleAccelerate)
+JeffClient.cpu_setting(:accelerate) && (@eval import AppleAccelerate)
 
 function main()
     length(ARGS) == 2 ||

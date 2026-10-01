@@ -11,7 +11,7 @@ using JeffClient, Octavian, LinearAlgebra, Test, InteractiveUtils
             expected = copy(output)
             mul!(expected, state, rhs, -1.0f0, beta)
             original_state, original_rhs = copy(state), copy(rhs)
-            withenv("JEFF_CPU_OCTAVIAN_DELTA" => "1") do
+            JeffClient.with_cpu_settings(:octavian_delta => "1") do
                 JeffClient.cpu_delta_state_product!(output, state, rhs, -1.0f0, beta)
             end
             @test output ≈ expected atol=2e-5 rtol=2e-5
@@ -21,7 +21,7 @@ using JeffClient, Octavian, LinearAlgebra, Test, InteractiveUtils
     end
 end
 
-withenv("JEFF_CPU_OCTAVIAN_DELTA" => "1") do
+JeffClient.with_cpu_settings(:octavian_delta => "1") do
     a = ones(Float32, 128, 128)
     b = ones(Float32, 128, 64)
     c = similar(b)

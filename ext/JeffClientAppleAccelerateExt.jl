@@ -5,7 +5,7 @@ import AppleAccelerate
 
 function JeffClient.native_cpu_silu!(output::Matrix{Float32}, exponential::Matrix{Float32})
     JeffClient.cpu_portable_silu!(output) && return output
-    if !Sys.isapple() || get(ENV, "JEFF_CPU_VECTOR_MATH", "0") != "1"
+    if !Sys.isapple() || !JeffClient.cpu_setting(:vector_math)
         return invoke(JeffClient.native_cpu_silu!, Tuple{Any,Any}, output, exponential)
     end
     size(output) == size(exponential) ||
@@ -20,7 +20,7 @@ function JeffClient.cpu_owned_mlp_gate!(gate::Matrix{Float32}, up::Matrix{Float3
     JeffClient.cpu_portable_gate!(gate, up) && return gate
     Base.mightalias(gate, up) &&
         return invoke(JeffClient.cpu_owned_mlp_gate!, Tuple{Any,Any}, gate, up)
-    if !Sys.isapple() || get(ENV, "JEFF_CPU_VECTOR_MATH", "0") != "1"
+    if !Sys.isapple() || !JeffClient.cpu_setting(:vector_math)
         return invoke(JeffClient.cpu_owned_mlp_gate!, Tuple{Any,Any}, gate, up)
     end
     size(gate) == size(up) || throw(DimensionMismatch("MLP gate shapes differ."))

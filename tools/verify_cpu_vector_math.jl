@@ -2,7 +2,10 @@ using JeffClient, LoopVectorization, Test
 @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 
 @testset "Portable vector activation guards and ownership" begin
-    withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1", "JEFF_CPU_VECTOR_MATH_BLOCKS" => "0") do
+    JeffClient.with_cpu_settings(
+        :portable_vector_math => "1",
+        :vector_math_blocks => "0",
+    ) do
         for n in (1, 7, 8, 9, 101), width in (1, 128)
             gate = reshape(0.1f0 .+ sin.(Float32.(1:(width*n))), width, n)
             up = reshape(0.2f0 .+ cos.(Float32.(1:(width*n))), width, n)
@@ -62,7 +65,10 @@ end
 
 import JSON
 @testset "Blockwise SiLU retains exceptional scalar semantics" begin
-    withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1", "JEFF_CPU_VECTOR_MATH_BLOCKS" => "1") do
+    JeffClient.with_cpu_settings(
+        :portable_vector_math => "1",
+        :vector_math_blocks => "1",
+    ) do
         for n in (1, 255, 256, 257, 513, 1024)
             for exception in (
                 0.0f0,
@@ -90,6 +96,6 @@ import JSON
         end
     end
 end
-withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1") do
+JeffClient.with_cpu_settings(:portable_vector_math => "1") do
     include(joinpath(@__DIR__, "..", "test", "native.jl"))
 end

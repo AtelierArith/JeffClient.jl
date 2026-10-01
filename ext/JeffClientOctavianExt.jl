@@ -10,7 +10,7 @@ function JeffClient.cpu_delta_state_product!(
     alpha::Float32,
     beta::Float32,
 )
-    if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1" &&
+    if JeffClient.cpu_setting(:octavian_delta) &&
        size(state, 1) <= 256 &&
        size(state, 2) <= 256 &&
        size(rhs, 2) <= 128

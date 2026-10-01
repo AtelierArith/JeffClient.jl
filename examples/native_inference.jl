@@ -1,15 +1,6 @@
 using JeffClient
 import JSON
 
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
-    Sys.isapple() || error("Apple Accelerate requires macOS.")
-    import AppleAccelerate
-    import LinearAlgebra
-    any(
-        lib -> occursin("Accelerate", lib.libname),
-        LinearAlgebra.BLAS.get_config().loaded_libs,
-    ) || error("Accelerate BLAS forwarding requires macOS 13.4 or later.")
-end
 
 if length(ARGS) == 2 && ARGS[2] == "metal"
     import Metal

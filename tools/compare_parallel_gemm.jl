@@ -1,5 +1,5 @@
 using JeffClient, LinearAlgebra, BenchmarkTools, Test
-if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+if JeffClient.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 
@@ -23,7 +23,7 @@ end
 function main()
     backend = NativeBackend(only(ARGS))
     BLAS.set_num_threads(1)
-    get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1" && AppleAccelerate.set_num_threads(1)
+    JeffClient.cpu_setting(:accelerate) && AppleAccelerate.set_num_threads(1)
     println("BLAS ", BLAS.get_config(), "; threads=", BLAS.get_num_threads())
     for (name, original) in (
             ("gate", first(backend.layers).mlp.gate),

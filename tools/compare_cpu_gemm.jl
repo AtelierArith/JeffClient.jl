@@ -1,13 +1,13 @@
 using JeffClient, LinearAlgebra, BenchmarkTools, Octavian, Test
 import AppleAccelerate
-if get(ENV, "JEFF_CPU_BLIS", "0") == "1"
+if "--blis" in ARGS
     import BLISBLAS
 end
 
 function main()
-    backend = NativeBackend(only(ARGS))
+    backend = NativeBackend(only(filter(!=("--blis"), ARGS)))
     BLAS.set_num_threads(8)
-    if get(ENV, "JEFF_CPU_BLIS", "0") == "1"
+    if "--blis" in ARGS
         BLISBLAS.set_num_threads(8)
         println("BLIS threads: ", BLISBLAS.get_num_threads())
     end

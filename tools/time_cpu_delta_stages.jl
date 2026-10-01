@@ -119,23 +119,10 @@ function pass(backend, ids, mask)
 end
 
 function main()
-    get(ENV, "JEFF_CPU_DELTA_PROJECTION_WORKSPACE", "0") == "1" && error(
+    JeffClient.cpu_setting(:delta_projection_workspace) && error(
         "This stage diagnostic requires projection workspace disabled; use time_cpu_phases.jl to profile the workspace path.",
     )
     length(ARGS) == 2 || error("Usage: time_cpu_delta_stages.jl MODEL REFERENCE")
-    for flag in (
-        "JEFF_CPU_PORTABLE_VECTOR_MATH",
-        "JEFF_CPU_RECURRENT_DELTA",
-        "JEFF_CPU_PARALLEL_PROJECTIONS",
-        "JEFF_CPU_PROJECTION_THREAD_SCOPE",
-        "JEFF_CPU_PARALLEL_FULL_HEADS",
-        "JEFF_CPU_PARALLEL_HEADS",
-        "JEFF_CPU_MLP_WORKSPACE",
-        "JEFF_CPU_DELTA_WORKSPACE",
-        "JEFF_CPU_FINAL_QUERY",
-    )
-        get(ENV, flag, "0") == "1" || error("Set $flag=1 for this diagnostic.")
-    end
     BLAS.set_num_threads(1)
     backend = NativeBackend(ARGS[1])
     sample = only(JSON.parsefile(ARGS[2]))
@@ -171,4 +158,6 @@ function main()
         flush(stdout)
     end
 end
-main()
+JeffClient.with_cpu_settings(:delta_projection_workspace => false) do
+    main()
+end
