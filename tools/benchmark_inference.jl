@@ -3,6 +3,11 @@ using JeffClient
 using LinearAlgebra
 using Profile
 import JSON
+if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+    import LoopVectorization
+    Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
+        error("LoopVectorization extension was not loaded; run Pkg.resolve().")
+end
 if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
     import Octavian
     Base.get_extension(JeffClient, :JeffClientOctavianExt) === nothing &&
@@ -102,6 +107,14 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_parallel_projections_enabled"] =
+                get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") == "1"
+            result["model_retained_julia_bytes"] = Base.summarysize(backend)
+            # Process high-water mark includes startup/loading/compilation, not
+            # only the warmed inference; it is not cumulative Julia heap bytes.
+            result["process_peak_rss_bytes"] = Sys.maxrss()
+            result["cpu_portable_vector_math_enabled"] =
+                get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
             result["cpu_recurrent_delta_enabled"] =
                 get(ENV, "JEFF_CPU_RECURRENT_DELTA", "0") == "1"
             result["cpu_octavian_delta_enabled"] =

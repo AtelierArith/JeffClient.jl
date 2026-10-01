@@ -57,6 +57,50 @@ An independent 50-call recurrent repeat measured 402.39 ms median / 455.79 ms
 p95 with the same allocation figures and reference error: about 1.23× the
 original Intel baseline, still slower than the required 247.63 ms.
 
+### Portable activation and projection experiment
+
+Importing LoopVectorization enables the optional extension when
+`JEFF_CPU_PORTABLE_VECTOR_MATH=1`. It vectorizes owned Float32 SiLU and fused
+MLP gating only after checking a conservative finite input domain; exceptional
+values, zeros, tiny magnitudes, unsupported types, and gate/up aliasing fall
+back without first modifying either input. The ordinary path preserves `up`.
+Fast-math can change rounding even inside the accepted domain. This experiment
+is disabled by default, and does not prove accuracy for arbitrary models.
+
+`JEFF_CPU_PARALLEL_PROJECTIONS=1` splits output rows across Julia workers,
+but only with single-threaded BLAS and sufficiently large products (at least
+256 output rows and one million multiply-elements). Set BLAS threads before
+inference; the implementation does not change global BLAS settings during a
+forward. Aliasing destinations use a temporary result. Inputs and weights
+remain read-only, and workers own disjoint output rows until `@sync` completes.
+
+On the same Intel model/input, with recurrent DeltaNet, parallel heads, MLP
+and Delta workspace, trim and final-query enabled, 20 warm calls measured:
+
+| Configuration | Median | p95 | Julia heap bytes / allocations |
+| --- | ---: | ---: | ---: |
+| Julia 8 / OpenBLAS 1, parallel projections, scalar activation | 475.59 ms | 509.22 ms | 292,331,056 / 12,852 |
+| Julia 8 / OpenBLAS 1, parallel projections, vector activation | 365.62 ms | 391.09 ms | 292,332,400 / 12,894 |
+| Julia 8 / OpenBLAS 8, unsplit projections, vector activation | 513.78 ms | 537.36 ms | 291,775,952 / 5,255 |
+
+The vector/parallel result has maximum saved-reference logit error `1.05e-5`,
+model-retained Julia memory 3.01 GB, and process peak RSS 5.35 GB. Peak RSS
+includes loading and compilation, not only warmed inference. Raw results are
+`artifacts/cpu-tuning/parallel-portable-vector.json`,
+`parallel-scalar-repeat.json`, and `openblas8-portable-vector.json`.
+The libraries are portable to Linux/macOS, but only this macOS Intel machine
+has been measured. Compared with the original 495.25 ms baseline this is
+about **1.35×, still not 2×**. Do not replace that baseline with the slower
+OpenBLAS control to claim completion.
+An independent 20-call vector/parallel repeat measured 382.68 ms median /
+462.79 ms p95, with the same heap counts and reference error. Its noisier tail
+is a reason not to describe this configuration as universally faster.
+
+Run `tools/verify_cpu_vector_math.jl` in the tools environment for activation
+guards, ownership and independent tiny-model checks;
+`tools/compare_cpu_vector_math.jl` and `tools/compare_parallel_gemm.jl` are
+microbenchmarks, not substitutes for full inference measurements.
+
 ## Real 0.8B checkpoint: the README demo
 
 These benchmarks use **Jeff's actual trained 0.8B weights**, not the tiny test

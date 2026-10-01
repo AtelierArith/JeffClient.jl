@@ -4,6 +4,11 @@ using InteractiveUtils
 using Profile
 import JSON
 import JET
+if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+    import LoopVectorization
+    Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
+        error("LoopVectorization extension was not loaded.")
+end
 if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
     import Octavian
 end
@@ -17,7 +22,7 @@ end
 
 function main()
     length(ARGS) == 2 || error("Usage: profile_native_cpu.jl CHECKPOINT REFERENCE_JSON")
-    BLAS.set_num_threads(8)
+    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
     sample = only(JSON.parsefile(ARGS[2]))
     inputs = Dict(
         name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for
@@ -38,6 +43,8 @@ function main()
         modules = extension === nothing ? (JeffClient,) : (JeffClient, extension)
         octavian = Base.get_extension(JeffClient, :JeffClientOctavianExt)
         octavian === nothing || (modules = (modules..., octavian))
+        vector_math = Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt)
+        vector_math === nothing || (modules = (modules..., vector_math))
         show(
             stdout,
             MIME"text/plain"(),

@@ -134,3 +134,38 @@ end
         end
     end
 end
+
+@testset "CPU parallel projection ownership" begin
+    previous_threads = JeffClient.BLAS.get_num_threads()
+    try
+        JeffClient.BLAS.set_num_threads(1)
+        withenv("JEFF_CPU_PARALLEL_PROJECTIONS" => "1") do
+            weight = reshape(sin.(Float32.(1:(64*257))), 64, 257)
+            for w in (weight, transpose(permutedims(weight))), n in (1, 65)
+                input = reshape(cos.(Float32.(1:(64*n))), 64, n)
+                saved_input, saved_weight = copy(input), copy(w)
+                expected = transpose(w) * input
+                output = fill(Float32(NaN), 257, n)
+                @test JeffClient.cpu_projection!(output, w, input) === output
+                @test output ≈ expected atol=2e-5 rtol=2e-5
+                @test input == saved_input
+                @test w == saved_weight
+                tasks = [Threads.@spawn(JeffClient.native_linear(w, input)) for _ = 1:2]
+                @test all(fetch(task) ≈ expected for task in tasks)
+            end
+            w = reshape(sin.(Float32.(1:(256*256))), 256, 256)
+            input = copy(w)
+            expected = transpose(w) * input
+            @test JeffClient.cpu_projection!(input, w, input) ≈ expected
+            input = copy(w)
+            @test JeffClient.cpu_projection!(w, w, input) ≈ expected
+            @test_throws DimensionMismatch JeffClient.cpu_projection!(
+                zeros(Float32, 3, 2),
+                zeros(Float32, 4, 3),
+                zeros(Float32, 5, 2),
+            )
+        end
+    finally
+        JeffClient.BLAS.set_num_threads(previous_threads)
+    end
+end

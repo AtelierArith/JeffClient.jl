@@ -1,13 +1,58 @@
 # CPU paths use column-major loops and preserve the generic GPU dispatch.
 native_conv_weights(::Val{:cpu}, weight) = transpose(permutedims(weight))
+cpu_portable_silu!(output) = false
+cpu_portable_gate!(gate, up) = false
 function native_cpu_silu!(output)
+    cpu_portable_silu!(output) && return output
     output .= native_silu.(output)
     return output
 end
 native_cpu_silu!(output, scratch) = native_cpu_silu!(output)
 
 # Both projection outputs are owned by this call and disposable after gating.
-cpu_owned_mlp_gate!(gate, up) = native_mlp_gate!(gate, up)
+cpu_owned_mlp_gate!(gate, up) =
+    cpu_portable_gate!(gate, up) ? gate : native_mlp_gate!(gate, up)
+
+function cpu_projection_block!(output, weight, input, rows)
+    lhs =
+        weight isa Transpose{Float32,Matrix{Float32}} ? @view(parent(weight)[rows, :]) :
+        transpose(@view(weight[:, rows]))
+    mul!(@view(output[rows, :]), lhs, input)
+    return nothing
+end
+
+function cpu_projection!(output, weight, input)
+    size(input, 1) == size(weight, 1) &&
+    size(output) == (size(weight, 2), size(input, 2)) ||
+        throw(DimensionMismatch("Projection shapes differ."))
+    if Base.mightalias(output, input) || Base.mightalias(output, weight)
+        return copyto!(output, native_matmul(transpose(weight), input))
+    end
+    workers = min(Threads.nthreads(:default), size(output, 1))
+    if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
+       workers == 1 ||
+       BLAS.get_num_threads() != 1 ||
+       size(output, 1) < 256 ||
+       length(output) * size(input, 1) < 1_000_000
+        return mul!(output, transpose(weight), input)
+    end
+    @sync for worker = 1:workers
+        rows =
+            (fld((worker-1)*size(output, 1), workers)+1):fld(
+                worker*size(output, 1),
+                workers,
+            )
+        Threads.@spawn cpu_projection_block!(output, weight, input, rows)
+    end
+    return output
+end
+
+function native_linear(weight::AbstractMatrix{Float32}, x::Matrix{Float32})
+    get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") == "1" ||
+        return native_matmul(transpose(weight), x)
+    output = Matrix{Float32}(undef, size(weight, 2), size(x, 2))
+    return cpu_projection!(output, weight, x)
+end
 
 function native_mlp(mlp, x::Matrix{Float32})
     gate = native_linear(mlp.gate, x)
@@ -31,8 +76,8 @@ end
 native_mlp(mlp, x::Matrix{Float32}, ::Nothing) = native_mlp(mlp, x)
 function native_mlp(mlp, x::Matrix{Float32}, buffers::Tuple)
     gate, up = buffers
-    mul!(gate, transpose(mlp.gate), x)
-    mul!(up, transpose(mlp.up), x)
+    cpu_projection!(gate, mlp.gate, x)
+    cpu_projection!(up, mlp.up, x)
     return native_linear(mlp.down, cpu_owned_mlp_gate!(gate, up))
 end
 

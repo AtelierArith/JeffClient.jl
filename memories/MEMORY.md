@@ -781,3 +781,21 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 
 - 検証+profile session99822はexit0。15ケースと再訪、各2回/GC/input保持/以前返したscores保持は通過、maxerror3.3974648e-5。JET core+extension No errors detected。warm186.076ms/385,451,840bytes/GC0.853ms。worker snapshotsではhead処理が複数workerへ分散。
 - ユーザーの現状commit/push指示に従い、検証済みMLP workspace・head並列化・overflow guardと診断ツールをまとめる。scratch層間再利用の案は未実装。極限最適化完了とは扱わない。READMEのoptional高速CPU設定は8worker+各flag、docsに4/8worker時間・heapのtradeoffを記録。
+
+## Intel portable CPU vector math and projection trial (2026-10-01)
+
+- Intel i9-9900Kでの現行比較基準は495.254ms（Apple Accelerate、Float32、Julia/BLAS8、parallel heads/MLP workspace/vector math/trim有効）。2倍目標は247.627ms以下。既存recurrent版402.391ms（50回）も未達。上のApple M4測定と混同しない。
+- LLVM/native inspectionではrecurrent state loopは既に8-wide Float32 SIMD、通常SiLUはscalar exp呼出し。inline/inboundsを追加するだけで指数関数のベクトル化を保証しない。tools/inspect_cpu_assembly.jl、artifacts/cpu-tuning/assembly-openblas.log。
+- MLPロード時物理transposeのIntel再試験も不採用。20回control401.366ms/trial406.642ms、load2.165→3.292s、peak RSS5.203→5.955GB。実装と専用テストを除去。pack-mlp-{control,trial}20.json。
+- optional LoopVectorization extensionを追加。JEFF_CPU_PORTABLE_VECTOR_MATH=1でのみ所有Matrix{Float32}のSiLU/MLP gateを@turboで融合。有限gate範囲(-20,80)、abs(gate)>1e-12、有限upでabs(up)が(1e-12,1e12)の範囲を全配列走査し、範囲外/alias/不正形状は変更前にfalseを返してscalar fallback。極端値やsigned zeroにfast-mathを適用しない。既定0。通常値でも丸めの一致ではなく許容誤差の確認が必要。
+- verify_cpu_vector_math.jlは126 activation/guard/ownership検証と294 native検証にexit0（8 threads）。NaN/Inf/overflow/underflow/±0、空/shape/alias、独立tiny PyTorch参照、GC後/同backend同時forward、chunk/worker/mask/length検証。任意checkpointの分類精度保証ではない。
+- 3584×101 SiLU micro 50回scalar2334.123us/vector191.692us、6144×101は3995.916us/373.822us（各32heap bytes）。入力はbounded合成値、copyはsetupで時間外。モデル全体の12倍化とは扱わない。
+- JEFF_CPU_PARALLEL_PROJECTIONS=1はJulia workerごとに出力行を分割、single-threaded BLASのみ利用。最低256 output rows/1e6 multiply-elements、8worker時も小行列は逐次fallback。入力/重みはreadonly、出力aliasは一時結果へ逃がす。forward中にBLAS global設定を変更しない。単独gate/down GEMMはOpenBLAS1の7.293/7.538ms→8Juliaworkers1.250/1.226ms、task heap3680bytes（parallel-gemm-openblas.log）。Linux/macOS対応ライブラリだがLinux性能は未測定。
+- real0.8B同parcel input B1/L256/active101、recurrent/head/MLP/trim/delta-workspace/final-query有効、OpenBLAS1＋Julia8 projection、20回scalar475.591ms/p95509.220msとportable vector365.620ms/p95391.088ms（parallel-scalar-repeat.json/parallel-portable-vector.json）。最大参照誤差1.05e-5、vector292332400heap bytes/12894alloc、model retained3.010637944GB/peak RSS5.346942976GB。RSSはロード・コンパイルを含むプロセス高水位、推論のscratchだけではない。
+- 同vector有効/同機能でprojection分割なしOpenBLAS8は513.775ms/p95537.363ms（openblas8-portable-vector.json）。parallel vectorは約1.405倍このcontrolより速い。元495.254ms比約1.355倍で、要求2倍には未達。
+- ユーザー指定でFlux/NNlibのmaster実装を読んだ。FluxはNNlibをreexportし、swishはinline x*sigmoid_fast(x)。sigmoid_fastは局所fastmath exp(-abs(x))、符号でinvまたはt/(1+t)、x>40/<-80は1/0へ飽和する。参考 https://github.com/FluxML/NNlib.jl/blob/master/src/activations.jl 。負の極端値で元式と異なるためそのまま置換しない。compare_cpu_vector_math.jlのnnlib_style実験は式を参考にしたもの、実NNlib実行の測定と混同しない。
+
+- portable vector/head/projection設定のProfile/JETはexit0、core＋LoopVectorization extensionにNo errors detected。warm342.329ms/292332400heap bytes/GC6.638ms。workerではOpenBLAS sgemm kernel/input packingが主、時間の確定値は別BenchmarkTools trialを用いる。Allocsは5%サンプリングでforward投影配列が残る（profile-portable-vector.log）。
+- NNlib-style式のSiLU micro再試験は3584×101 scalar2329.556us/NNlib-style2149.341us/vector190.114us、6144×101は3990.844/3759.258/376.539us。式だけの変更は約6〜8%短縮に留まり、指数関数の実ベクトル化が大きい。NNlib本体を導入・実行した結果ではない。
+- full test suiteはexit0（portable-checkpoint-tests.log）。別プロセスのvector/parallel20回repeatは382.683ms/p95462.790ms、同heap12894件/292332400bytes、最大参照誤差1.05e-5（parallel-portable-vector-repeat.json）。中央値の改善は再現するがtailは不安定、普遍的高速化や2倍達成は主張しない。極端値alias guardはBase.mightaliasで同じMatrix object以外の共有storageも除外する。
+- 最終alias guard版の1Julia worker fallback検証もexit0、126 activation＋294 native checks（vector-math-single-worker.log）。8worker版と1worker版の両方を確認。設定は既定offのまま、改善をcheckpointとしてcommit/pushし、目標はactiveを維持する。
