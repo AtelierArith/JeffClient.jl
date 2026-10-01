@@ -131,6 +131,33 @@ input preservation, GC reuse, and task-local policy restoration tests.
 JET reported no errors for the inspected real-model forward; its warmed
 profile measured 300.78 ms, but is not a substitute for the benchmark trial.
 
+### Delta normalization and blockwise SiLU experiment
+
+`JEFF_CPU_DELTA_NORM_LOOP=1` normalizes owned Q/K arrays with column-major
+SIMD reductions and division, avoiding intermediate reduction/broadcast
+arrays. It retains Float32, with no explicit fast-math, but the summation
+order may change. Reference and exceptional-value checks remain necessary.
+
+`JEFF_CPU_VECTOR_MATH_BLOCKS=1`, together with the portable vector-math
+extension, handles SiLU arrays that fail the whole-array guard in blocks of
+256 elements. Each block uses the same conservative domain checks: safe
+blocks use vector math; other blocks use the unchanged scalar formula,
+including NaN/Inf, signed zeros and underflow. It does not relax the accepted
+domain or change the MLP gate's ownership/alias behavior. Both flags default
+to off.
+
+Adding both flags to the preceding portable configuration measured
+302.63 ms median / 324.11 ms p95 over 20 warm forwards, with 271,128,624 Julia
+heap bytes / 12,601 allocations and maximum saved-reference logit error
+`1.14e-5` (`artifacts/cpu-tuning/delta-norm-block.json`). This is about 1.64×
+the original Intel baseline, still above the 247.63 ms target.
+`tools/time_cpu_delta_stages.jl` follows real layer activations and validates
+the final scores, but its instrumented phase times and domain scans are
+diagnostics, not a replacement for full-forward benchmarking.
+An independent 30-call repeat measured 304.16 ms median / 328.89 ms p95,
+with the same allocation figures and reference error. JET reported no errors
+for the inspected forward; the separate warmed profile was 286.47 ms.
+
 ## Real 0.8B checkpoint: the README demo
 
 These benchmarks use **Jeff's actual trained 0.8B weights**, not the tiny test

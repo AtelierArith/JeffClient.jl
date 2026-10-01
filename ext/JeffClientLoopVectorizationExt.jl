@@ -5,9 +5,9 @@ using LoopVectorization
 
 # Guard the fast-math loop against exceptional values, signed zeros, and tiny
 # outputs. Outside this conservative domain use the unchanged scalar formula.
-function eligible_silu(values)
+function eligible_silu(values, span = eachindex(values))
     valid = true
-    @inbounds @simd for i in eachindex(values)
+    @inbounds @simd for i in span
         x = values[i]
         valid &= isfinite(x) & (x > -20.0f0) & (x < 80.0f0) & (abs(x) > 1.0f-12)
     end
@@ -26,7 +26,22 @@ end
 function JeffClient.cpu_portable_silu!(output::Matrix{Float32})
     get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1" || return false
     isempty(output) && return true
-    eligible_silu(output) || return false
+    if !eligible_silu(output)
+        get(ENV, "JEFF_CPU_VECTOR_MATH_BLOCKS", "0") == "1" || return false
+        for first = 1:256:length(output)
+            last = min(first + 255, length(output))
+            if eligible_silu(output, first:last)
+                @turbo for i = first:last
+                    output[i] = output[i] * inv(1.0f0 + exp(-output[i]))
+                end
+            else
+                @inbounds for i = first:last
+                    output[i] = JeffClient.native_silu(output[i])
+                end
+            end
+        end
+        return true
+    end
     @turbo for i in eachindex(output)
         output[i] = output[i] * inv(1.0f0 + exp(-output[i]))
     end

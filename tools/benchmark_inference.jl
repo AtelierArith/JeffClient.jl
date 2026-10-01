@@ -107,6 +107,10 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_vector_math_blocks_enabled"] =
+                get(ENV, "JEFF_CPU_VECTOR_MATH_BLOCKS", "0") == "1"
+            result["cpu_delta_norm_loop_enabled"] =
+                get(ENV, "JEFF_CPU_DELTA_NORM_LOOP", "0") == "1"
             result["cpu_parallel_full_heads_enabled"] =
                 get(ENV, "JEFF_CPU_PARALLEL_FULL_HEADS", "0") == "1"
             result["cpu_projection_thread_scope_enabled"] =

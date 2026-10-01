@@ -2,7 +2,7 @@ using JeffClient, LoopVectorization, Test
 @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 
 @testset "Portable vector activation guards and ownership" begin
-    withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1") do
+    withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1", "JEFF_CPU_VECTOR_MATH_BLOCKS" => "0") do
         for n in (1, 7, 8, 9, 101), width in (1, 128)
             gate = reshape(0.1f0 .+ sin.(Float32.(1:(width*n))), width, n)
             up = reshape(0.2f0 .+ cos.(Float32.(1:(width*n))), width, n)
@@ -61,6 +61,35 @@ using JeffClient, LoopVectorization, Test
 end
 
 import JSON
+@testset "Blockwise SiLU retains exceptional scalar semantics" begin
+    withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1", "JEFF_CPU_VECTOR_MATH_BLOCKS" => "1") do
+        for n in (1, 255, 256, 257, 513, 1024)
+            for exception in (
+                0.0f0,
+                -0.0f0,
+                Float32(NaN),
+                Float32(Inf),
+                -Float32(Inf),
+                floatmax(Float32),
+                -100.0f0,
+                nextfloat(0.0f0),
+            )
+                input = reshape(0.1f0 .+ sin.(Float32.(1:n)), n, 1)
+                input[min(n, 257)] = exception
+                expected = JeffClient.native_silu.(input)
+                actual = copy(input)
+                @test JeffClient.cpu_portable_silu!(actual)
+                for i in eachindex(actual)
+                    if !isfinite(expected[i]) || iszero(expected[i])
+                        @test isequal(actual[i], expected[i])
+                    else
+                        @test isapprox(actual[i], expected[i]; atol = 2e-6, rtol = 2e-6)
+                    end
+                end
+            end
+        end
+    end
+end
 withenv("JEFF_CPU_PORTABLE_VECTOR_MATH" => "1") do
     include(joinpath(@__DIR__, "..", "test", "native.jl"))
 end

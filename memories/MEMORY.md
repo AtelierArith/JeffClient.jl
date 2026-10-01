@@ -811,3 +811,16 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - full-heads-parallel.jsonの20回は319.038ms/p95345.544ms/271369904heap bytes/12671allocs。独立30回repeatは318.656ms/p95333.545ms、同heap/alloc、最大参照誤差1.05e-5、model retained3.010637944GB、peak RSS5.312884736GB（full-heads-parallel-repeat.json）。直前365.620〜382.683msから改善を再現し、元495.254ms比約1.554倍。2倍目標247.627msは未達。
 - full test suiteはexit0（full-heads-checkpoint-tests.log）。real modelのcore+portable extension JETはNo errors detected、warm300.779ms/271369904bytes/GC5.474ms、5forward時間Profile＋5%Allocsはprofile-full-heads.logに保存。scope単独でなく今回のhead並列/コピー削減を組み合わせた改善として報告する。
 - 1workerの全新flag fallbackも126 activation＋335 native checksにexit0（full-heads-single-worker.log）。JuliaFormatter整形済み。今回の改善をcommit/pushし、目標activeを維持する。次候補はDeltaNetの残るprojection/state/gating段階別計測とprojection融合。model精度Float32を維持し、過去不採用MLP transposeを根拠なく再導入しない。
+
+## DeltaNet normalization and blockwise vector activation trial
+
+- 前turnはfull attention/head-copy削減、task-local BLAS policy、全test/JET/Profile/独立repeat/commit-pushでprogress。現行c5af264から段階別のdiagnostic tools/time_cpu_delta_stages.jlを追加した。real modelの実activationsを層順に流し、毎passのlogitsを保存済み独立参照と照合する。instrumented phase測定でありBenchmarkTools中央値の代替ではない。
+- 最初の5passesのstage合計中央値: mask0.747ms/qkv56.497/conv+SiLU27.229/QK prepare15.462/z-beta-decay22.184/state-RMS-gate18.925/out projection18.203。ステージを分けたdomain調査はconv12.151/SiLU13.630/QK15.288ms。domain走査の時間はphase外だがpass全体には含まれる。
+- domain調査の最初の試作はconvolution出力similarを0初期化せず参照guardでexit1（delta-stages-domain.jsonl）。これは計測toolの不具合でproductionコードは変更していない。そのデータは採用せず、zerosを使う修正版5passesがexit0/参照guard通過（delta-stages-domain-corrected.jsonl）。
+- 第1Delta層のSiLU前値はmin-20.083/max10.065、-20以下が1要素、abs<=1e-12が1414要素。第2層はmin-26.428/max7.896、-20以下4要素。それ以外の16Delta層は既存eligible範囲内。少数の値で62万要素のwhole-array SIMDがfallbackする費用を確認した。
+- JEFF_CPU_VECTOR_MATH_BLOCKS=1をportable SiLU callbackに追加。whole-array eligibleなら従来通り、範囲外を含むと256element spanごとに同じfinite/domain guardを評価。safe spanだけ@turbo、他spanは元のnative_silu式をscalarで評価する。NaN/Inf/±0/underflow/極端値にfastmathを適用しない。MLP gateのwhole-array条件/alias/input保持は変えない。既定0、portable flag1＋extension import必須。
+- JEFF_CPU_DELTA_NORM_LOOP=1は所有Q/Kの列優先SIMD平方和とdivisionに置換し中間reduction/broadcast配列を減らす。fastmathや低精度化なし。summation orderは変わり得るため参照検証が必要。既定0。helperのnormal/empty/extreme value102checksが通過。
+- block activationの18496 element checks、従来activation126checks、native437checksが8workersでexit0（delta-norm-block-validation.log）。chunk boundaries1/255/256/257/513/1024、NaN/Inf/floatmax/±0/subnormalを検証。
+- 同model/input/Julia8/OpenBLAS1/currentflags＋両新flagの20回は302.631ms/p95324.113ms/271128624heap bytes/12601allocs、max logit error1.1444e-5（delta-norm-block.json）。直前318.656msより短いが独立repeat/JET/fullsuite検証は進行中。元495.254msの2倍基準247.627msは未達。
+- 独立30回repeatは304.157ms/p95328.888ms/同heapとalloc/maxerror。model retained3.010637944GB、peak RSS5.344727040GB（delta-norm-block-repeat.json）。元495.254ms比約1.628倍、直前318.656msから約4.6%短縮。JET core+portable extension No errors detected、warm286.468ms/271128624bytes/GC5.628ms（profile-delta-norm-block.log）。full test suiteはdelta-norm-block-checkpoint-tests.logでexit0。
+- 最終版は1workerでもactivation126＋block18496＋native437checksがexit0（delta-norm-block-single-worker.log）。JuliaFormatter整形済み。実測改善をcheckpointとしてcommit/pushしgoalはactive維持。次は大きな費用を占める投影の融合/worker分割とメモリtrafficを検討する。

@@ -215,6 +215,24 @@ function cpu_delta_workspace(cfg, sequence_length)
     return [cpu_delta_worker_workspace(cfg, sequence_length) for _ = 1:workers]
 end
 
+function cpu_normalize_delta_heads!(values::Array{Float32,3}, multiplier::Float32)
+    if get(ENV, "JEFF_CPU_DELTA_NORM_LOOP", "0") != "1"
+        values ./= sqrt.(sum(abs2, values; dims = 1) .+ 1.0f-6) .* multiplier
+        return values
+    end
+    for token in axes(values, 3), head in axes(values, 2)
+        squared = 0.0f0
+        @inbounds @simd for row in axes(values, 1)
+            squared += abs2(values[row, head, token])
+        end
+        denominator = sqrt(squared + 1.0f-6) * multiplier
+        @inbounds @simd for row in axes(values, 1)
+            values[row, head, token] /= denominator
+        end
+    end
+    return values
+end
+
 function delta_attention(attention, x::Matrix{Float32}, mask, cfg, workspace = nothing)
     sequence_length = size(x, 2)
     masked = x .* reshape(Float32.(mask), 1, :)
@@ -240,8 +258,8 @@ function delta_attention(attention, x::Matrix{Float32}, mask, cfg, workspace = n
     )
     # Q/K heads are shared by multiple value heads. Normalize once, not once
     # per value head, and let chunk views reference the normalized storage.
-    q ./= sqrt.(sum(abs2, q; dims = 1) .+ 1.0f-6) .* sqrt(Float32(cfg.key_dim))
-    k ./= sqrt.(sum(abs2, k; dims = 1) .+ 1.0f-6)
+    cpu_normalize_delta_heads!(q, sqrt(Float32(cfg.key_dim)))
+    cpu_normalize_delta_heads!(k, 1.0f0)
     z = reshape(
         native_linear(attention.z, masked),
         cfg.value_dim,

@@ -237,3 +237,28 @@ end
         JeffClient.BLAS.set_num_threads(previous_threads)
     end
 end
+
+@testset "CPU Delta normalization loop" begin
+    for width in (1, 7, 16, 128),
+        heads in (1, 3),
+        n in (0, 1, 65),
+        scale in (1.0f0, sqrt(Float32(width)))
+
+        original = reshape(sin.(Float32.(1:(width*heads*n))), width, heads, n)
+        expected = original ./ (sqrt.(sum(abs2, original; dims = 1) .+ 1.0f-6) .* scale)
+        withenv("JEFF_CPU_DELTA_NORM_LOOP" => "1") do
+            actual = copy(original)
+            @test JeffClient.cpu_normalize_delta_heads!(actual, scale) === actual
+            @test actual ≈ expected atol=2e-6 rtol=2e-6
+        end
+    end
+    for x in
+        (0.0f0, -0.0f0, Float32(NaN), Float32(Inf), floatmax(Float32), nextfloat(0.0f0))
+        original = fill(x, 8, 2, 3)
+        expected = original ./ sqrt.(sum(abs2, original; dims = 1) .+ 1.0f-6)
+        actual = withenv("JEFF_CPU_DELTA_NORM_LOOP" => "1") do
+            JeffClient.cpu_normalize_delta_heads!(copy(original), 1.0f0)
+        end
+        @test isequal(actual, expected)
+    end
+end
