@@ -4,11 +4,10 @@
 
 CPU tuning environment variables have been removed. Normal CPU execution
 automatically uses the verified portable configuration on Intel/other platforms,
-or the previously fastest Accelerate configuration on Apple Silicon macOS
+or the Accelerate configuration on Apple Silicon macOS
 when Accelerate BLAS forwarding is available. SIMD domain/alias guards and
 forward-local ownership are retained; the unadopted QKV/Z fusion is not enabled.
-These policies select measured configurations, not a guarantee of the fastest
-implementation for every CPU or input.
+These policies do not guarantee the fastest implementation for every CPU or input.
 
 JeffClient initializes the process-wide BLAS thread count on import: one thread
 for portable execution with multiple Julia workers, up to eight for single-worker
@@ -31,11 +30,16 @@ and 316.923 ms p95, with OpenBLAS one thread and eight Julia workers.
 Heap allocation was 103,849,264 bytes and maximum absolute reference error
 was 1.2398e-5. Full tests, one/eight-worker numerical and ownership checks,
 and JET checks passed. Linux measurements of the automatic configuration are
-recorded in [Profiling and measurements](profiling.md). The automatic Apple M4 configuration has not been remeasured;
-that platform choice is based on the historical results on that page.
+recorded in [Profiling and measurements](profiling.md).
 
 ## Measurements
 
-See [Profiling and measurements](profiling.md) for the Linux CPU results,
+On Apple Silicon macOS, use `./tools/mac-M-series.sh` for the matched CPU and
+PyTorch MPS / Julia Metal.jl comparisons. The default uses one thread for CPU,
+Float32/full sequences, CPU input upload for GPU, and two independent runs.
+`--include-auto-cpu` adds a separate thread-budget comparison; `--mlx` adds
+the explicitly adapted MLX results. See `--help` for reproducible output paths.
+
+See [Profiling and measurements](profiling.md) for the new Apple M4 and Linux CPU results,
 Python comparison, thread configurations, Octavian experiment and historical
-CPU/Metal trials. Raw benchmark JSON is linked beside each measurement.
+Intel CPU trials. Raw benchmark JSON is linked beside each measurement.

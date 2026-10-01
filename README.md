@@ -104,11 +104,10 @@ Detailed documentation is maintained with Documenter.jl in [`docs/`](docs):
 - [API reference](docs/src/api.md)
 - [Development and documentation builds](docs/src/development.md)
 
-For this real 0.8B demo on Apple M4, warmed Float32 Metal inference takes about
-197 ms per forward, versus 364 ms for original Python MPS (1.85× faster).
-Optional workspace reuse and padding trim reduce it to 89 ms (4.07×).
-See [measured inference speed](https://github.com/AtelierArith/JeffClient.jl/blob/main/docs/src/profiling.md)
-for CPU results, first-run costs, comparison conditions, and reproducible commands.
+See [measured inference speed](docs/src/profiling.md) for CPU comparisons,
+comparison conditions and reproducible commands.
+On Apple Silicon macOS, reproduce the matched CPU/GPU comparisons with
+`./tools/mac-M-series.sh` (`--help` lists the options).
 Joint GPU batching remains experimental.
 
 The [development plan](PLAN.md), [measurement notes](memories/MEMORY.md), and

@@ -98,37 +98,14 @@ Independent PyTorch float32 references were generated with PythonCall; maximum
 absolute logit error for the current fused version is `3.361702e-5`. Metal scalar indexing was disabled and
 GC ran between cases. The verifier uses `atol=rtol=2e-4`.
 
-Speed baseline on Apple M4, batch 1 / length 256 / 101 active tokens, 10 warmed
-calls: Julia Metal Float32 2.450 s; Julia CPU Float32 1.901 s; original Python
-CPU Float32 2.988 s; original PyTorch MPS BF16 0.333 s; original PyTorch MPS
-Float32 0.351 s. This initial Metal version was about 7× slower than MPS at equal precision.
-The benchmark tools preserve model loading and first-call timing separately,
-check reference logits, and synchronize GPU work. Profiling was collected;
-performance optimization remains open. Accuracy is validated independently of
-these latency measurements.
+Past Apple M4 performance measurements have been withdrawn. Current matched
+CPU/GPU comparisons and their reproduction commands are in
+[Profiling and measurements](docs/src/profiling.md).
 
-Type inspection found an abstract attention parameter in the layer vector,
-propagating `hidden::Any`. A vector of the two concrete layer types removes all
-nine JeffClient JET runtime-dispatch reports. Allocation and latency stayed
-essentially unchanged (2,845,912 allocations, 145.8 MB Julia heap, 2.492 s after
-the fix). Profile/Allocs identify repeated DeltaNet masks/intermediates and MPS
-submission as allocation targets. GPU kernel timings have not been isolated.
-
-Laya-based improvements are implemented: per-queue private buffer reuse,
-MPSGraph encoding into Metal's current batch with queued lifetime roots,
-shared-memory uploads recycled only after synchronization, and causal-mask
-sharing across DeltaNet heads/chunks. Metal internal API use is pinned to
-Metal 1.11.1. Intermediate measurements: Metal 1.586 s / 2,647,320 Julia allocations /
-135.9 MB Julia heap; current CPU 1.834 s. Metal latency dropped ~36% versus
-2.492 s; at that stage it remained ~4.5× slower than original Float32 PyTorch MPS. Allocation
-count fell ~7%; substantial host allocation remains. The device buffer pool
-retained 1.47 GB of free buffers during this benchmark, so caching is not a
-claim of reduced total resident memory.
-
-The shared-upload implementation passed all 12 cases × 3 passes with
-the same maximum logit error (`3.3408403e-5`), GC between cases, and scalar GPU
-indexing disabled. Latest JET reports are clean for the inspected package and
-extension methods at that stage.
+Type inspection identified and removed an abstract attention parameter in the
+layer vector. Laya-based queue ownership, pooled buffers, shared-memory uploads
+and causal-mask reuse are implemented. Metal internal API use is pinned to
+Metal 1.11.1. Performance claims require fresh matched measurements.
 
 ### Fused kernels — implemented; allocation tuning continues
 
@@ -147,58 +124,11 @@ extension methods at that stage.
 - Retain fixed feed/result key arrays and construct their Objective-C
   dictionaries directly, avoiding Julia Dict storage and conversion copies.
 
-Current Apple M4 result, batch 1 / length 256 / 101 active tokens, Float32,
-20 warmed synchronized calls: Julia Metal **0.195 s**, original Python MPS
-**0.350 s**. Julia heap: **8,446 allocations / 364,512 bytes**. This is ~12.8×
-faster than the 2.492 s implementation, with ~99.7% fewer allocations. Loading
-and compilation are excluded; readout and CPU score return are included.
-The current implementation passes all 12 real-model cases × 3 passes, including
-GC between cases and disabled scalar indexing. The tiny fixture and primitive
-checks cover independent scores, real RMS widths, grouped head layouts,
-partial/full/no RoPE, gates, and cache keys. All six inspected JET targets are
-clean. Direct feed construction reduced allocations by another 15.4% while
-median latency remained unchanged. The latest full workspace allocation profile
-records 4,112 allocations, including 206 KernelState, no new MPS tensor-data, and
-13 MPS command wrappers. CPU sampling includes GPU waits and does not identify
-GPU kernel internals.
-
-Packed Q/K normalization and direct V recurrent reads remove the three QKV
-slice copies. Primitive checks cover widths 7/128/256 and lengths 1/9/65.
-Current matched batch 2 / length 512 / F32 medians are Julia workspace 776 ms
-and Python 1,301 ms, with 8,328 Julia allocations / 455,392 bytes. Workspace
-holds 1,766,096,896 device-buffer bytes. Earlier default private cache snapshots
-after trial/GC/trim were 4.06/5.06/4.77 GB; this is not
-peak GPU memory. Completed downloads now trim oversized free caches, while
-late GC returns may exceed the limit until the next trim.
-DeltaNet RMS/SiLU gate fusion and in-place residual/MLP activation are verified.
-Fixed-length MPS pointer storage removes the conversion pointer Vector.
-An opt-in task-local workspace now reuses intermediate arrays, their MPS
-tensor-data, and result value Vectors. Dedicated embedding gather avoids GPU
-index bounds checking after validating host IDs. The prepared B1/L256/F32 case
-measured 4,112 allocations / 221,200 bytes / 193 ms after feed Vector reuse,
-paired Q/K launch, beta/decay fusion, and dedicated mask/MLP/residual kernels, with 447 arrays retaining
-857,899,008 bytes. RMS launch parameter packing reduced another 201 allocations
-with unchanged bytes; layer-boundary residual/RMS fusion and readout views
-removed another 471 allocations / 4,576 bytes. MPS command wrapper reuse removed
-186 allocations / 5,952 bytes; removing redundant size scalars saved another
-78 / 2,976 bytes; compiled kernel handle reuse saved another 120 / 1,920 bytes.
-Extending handle reuse to common RMS widths and attention helpers saved
-another 999 / 47,024 bytes without an established latency improvement.
-Q/K, recurrent, and RoPE specialization, past-slot tensor-data reuse, and direct
-matrix gate outputs saved another 871 / 40,544 bytes. Workspace retains 296
-tensor-data objects; the warmed full allocation profile constructs none.
-Experimental `JEFF_METAL_PACKED_MLP=1` reduces matrix submissions and host
-allocations: B1 workspace 4,001 / 203,760 versus 4,112 / 221,200, with roughly
-192.5 versus 193.4 ms medians. Retained device buffers increase by 88,080,384
-bytes (176,160,768 for B2/L512). Latency ranges overlap, so default packing stays
-disabled. Independent 12-case validation, JET, CPU fixtures, and workspace
-identity/GC/exception/clear checks pass.
-The preceding MLP revision also reproduced 193 ms in an
-independent 20-run repeat; residual addition reduced allocation further. Real-model
-12-case × 3-pass validation and GC/identity primitive checks pass.
-Next work: workspace lifetime and retention control,
-intermediate lifetimes, MPS feed containers, and true batch execution. Reduce
-remaining allocations and measure changes against independent references.
+Packed Q/K normalization, recurrent reads, fused residual/RMS operations,
+embedding gather and task-local workspace reuse are implemented. Workspace
+lifetime, GC, shape changes and input ownership remain part of validation.
+Experimental MLP packing is disabled by default. Historical M4 latency and
+allocation comparisons have been withdrawn.
 
 For true Metal batch execution, the current row loop in `logits` must be replaced
 by a batch hook after input validation. Flatten tokens by sample for shared
