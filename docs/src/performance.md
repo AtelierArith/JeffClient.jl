@@ -120,9 +120,10 @@ See [Profiling and measurements](profiling.md) for the investigation and checks.
 ## Apple Silicon measurements
 
 On Apple Silicon macOS, use `./tools/mac-M-series.sh` for the matched CPU and
-PyTorch MPS / Julia Metal.jl comparisons. The default uses one thread for CPU,
-Float32/full sequences, CPU input upload for GPU, and two independent runs.
-`--include-auto-cpu` adds a separate thread-budget comparison; `--mlx` adds
+PyTorch MPS / Julia Metal.jl comparisons. The default includes both the
+one-thread CPU comparison and PyTorch 8 / Julia 8 with automatic Accelerate,
+reported separately because their thread budgets differ. It uses Float32/full
+sequences, CPU input upload for GPU, and two independent runs. `--mlx` adds
 the explicitly adapted MLX results. See `--help` for reproducible output paths.
 
 See [Profiling and measurements](profiling.md) for the new Apple M4 and Linux CPU results,

@@ -107,7 +107,9 @@ Detailed documentation is maintained with Documenter.jl in [`docs/`](docs):
 See [measured inference speed](docs/src/profiling.md) for CPU comparisons,
 comparison conditions and reproducible commands.
 On Apple Silicon macOS, reproduce the matched CPU/GPU comparisons with
-`./tools/mac-M-series.sh` (`--help` lists the options).
+`./tools/mac-M-series.sh`. Both the one-thread CPU comparison and the
+PyTorch 8 / Julia 8 with automatic Accelerate comparison run by default
+(`--help` lists the options).
 Joint GPU batching remains experimental.
 
 The [development plan](PLAN.md), [measurement notes](memories/MEMORY.md), and

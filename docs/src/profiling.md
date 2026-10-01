@@ -67,13 +67,14 @@ For standard reproduction on Apple Silicon macOS, use the sequential driver:
 
 ```sh
 ./tools/mac-M-series.sh
-# Include the additional automatic-thread CPU comparison and MLX:
-./tools/mac-M-series.sh --include-auto-cpu --mlx
+# Include MLX (the automatic-thread CPU comparison runs by default):
+./tools/mac-M-series.sh --mlx
 # Prepare the Python environment first if needed (requires uv):
-./tools/mac-M-series.sh --setup-python --include-auto-cpu --mlx
+./tools/mac-M-series.sh --setup-python --mlx
 ```
 
-The default is 30 samples × 2 fresh processes per implementation. Use `--help`
+The default includes both one-thread and automatic-thread CPU comparisons,
+with 30 samples × 2 fresh processes per implementation. Use `--help`
 for checkpoint/reference/output and sample/repeat options. It saves `summary.md`,
 `summary.json`, individual JSON/logs, runtime versions and model/reference/tool
 hashes under a timestamped ignored artifacts directory. It verifies actual CPU

@@ -8,7 +8,6 @@ REFERENCE="$ROOT/examples/data/parcel_reference.json"
 OUTPUT="$ROOT/artifacts/benchmarks/mac-M-series-$(date -u +%Y%m%dT%H%M%SZ)"
 SAMPLES=30
 REPEATS=2
-AUTO_CPU=0
 MLX=0
 SETUP_PYTHON=0
 JULIA_BIN=${JULIA_BIN:-julia}
@@ -20,11 +19,11 @@ Usage: ./tools/mac-M-series.sh [options]
   --output DIR           New result directory (default: timestamped artifacts path)
   --samples N            Warmed forwards per process, at least 3 (default: 30)
   --repeats N            Fresh processes per implementation (default: 2)
-  --include-auto-cpu     Add PyTorch 8 vs Julia 8 / Accelerate automatic; separate budget
   --mlx                  Add adapted MLX GPU and framework-managed CPU results
   --setup-python         Prepare extern/jeff/.venv with uv before measurement
   --help                 Show this help
-Default: CPU 1 vs 1, and PyTorch MPS Float32 vs Julia Metal.jl on the same GPU.
+Default: CPU 1 vs 1, PyTorch 8 vs Julia 8 / Accelerate automatic (separate budget),
+and PyTorch MPS Float32 vs Julia Metal.jl on the same GPU.
 All run full sequences; GPU timing includes CPU input upload and score download.
 Setup, imports, loading, tokenization and compilation are outside warm timings.
 Run from an otherwise idle machine on AC power. No CPU affinity is imposed.
@@ -39,7 +38,6 @@ while (($#)); do
                 --output) OUTPUT=$2;; --samples) SAMPLES=$2;; --repeats) REPEATS=$2;;
             esac
             shift 2;;
-        --include-auto-cpu) AUTO_CPU=1; shift;;
         --mlx) MLX=1; shift;;
         --setup-python) SETUP_PYTHON=1; shift;;
         --help|-h) usage; exit 0;;
@@ -100,10 +98,8 @@ for ((run=1; run<=REPEATS; run++)); do
     run_bench "cpu-single-julia-run$run" "$JULIA_BIN" --threads=1 --startup-file=no --project=tools tools/benchmark_cpu_single_julia.jl "$CHECKPOINT" cpu "$REFERENCE" 1 "$SAMPLES" "$OUTPUT/cpu-single-julia-run$run.json"
     run_bench "gpu-pytorch-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_gpu_python.jl "$CHECKPOINT" mps-f32 "$REFERENCE" "$SAMPLES" "$OUTPUT/gpu-pytorch-run$run.json"
     run_bench "gpu-metal-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_metal_reference.jl "$CHECKPOINT" metal "$REFERENCE" 1 "$SAMPLES" "$OUTPUT/gpu-metal-run$run.json"
-    if ((AUTO_CPU)); then
-        run_bench "cpu-eight-python-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_original.jl "$CHECKPOINT" cpu "$REFERENCE" "$SAMPLES" "$OUTPUT/cpu-eight-python-run$run.json"
-        run_bench "cpu-auto-julia-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu "$REFERENCE" 1 "$SAMPLES" "$OUTPUT/cpu-auto-julia-run$run.json" --python-reference
-    fi
+    run_bench "cpu-eight-python-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_original.jl "$CHECKPOINT" cpu "$REFERENCE" "$SAMPLES" "$OUTPUT/cpu-eight-python-run$run.json"
+    run_bench "cpu-auto-julia-run$run" "$JULIA_BIN" --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu "$REFERENCE" 1 "$SAMPLES" "$OUTPUT/cpu-auto-julia-run$run.json" --python-reference
     if ((MLX)); then
         run_bench "gpu-mlx-run$run" "$JULIA_BIN" --threads=1 --startup-file=no --project=tools tools/benchmark_mlx.jl "$CHECKPOINT" gpu "$REFERENCE" "$OUTPUT/gpu-mlx-run$run.json" "$SAMPLES" reference-norm
         run_bench "cpu-mlx-run$run" "$JULIA_BIN" --threads=1 --startup-file=no --project=tools tools/benchmark_mlx.jl "$CHECKPOINT" cpu "$REFERENCE" "$OUTPUT/cpu-mlx-run$run.json" "$SAMPLES" reference-norm

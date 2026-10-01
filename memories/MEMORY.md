@@ -1,5 +1,20 @@
 # パフォーマンスの知見
 
+## 2026-10-01: 自動スレッド CPU 比較を標準 driver の既定へ変更
+
+- ユーザー指定で `tools/mac-M-series.sh` の `--include-auto-cpu` とAUTO_CPU分岐を廃止。PyTorch8とJulia8/Accelerate自動の比較はCPU1対1・GPU比較とともに毎回実行する。スレッド予算が異なる比較としての区別、既定30samples×2fresh processes、逐次実行は維持。追加実験だったJulia1/Accelerate自動はこのフラグの旧機能に含まれておらず、driverへ追加していない。
+- README/performance/profilingとhelpを更新。過去の測定記録中の旧フラグは当時の再現コマンドとして保持する。今後はフラグなしで実行し、旧フラグを渡すとunknown option/exit2となる。
+- `bash -n`、help表示・旧フラグ拒否・diff checkを確認。実機でフラグなし `--samples 3 --repeats 1 --checkpoint <pinned Scratch path>` を実行しexit0、全6groupsのJSONとsummary guardを確認。ignored `artifacts/benchmarks/mac-M-series-20261001T083530Z/`。3samplesは変更の動作確認であり新しい性能ベースラインとして扱わない。
+
+## 2026-10-01: M2 Max / CPU thread budget 比較
+
+- ユーザー依頼で `./tools/mac-M-series.sh --include-auto-cpu --checkpoint <pinned Scratch path>` を実行しexit0。追加依頼により、終了後に `julia --threads=1 --startup-file=no --project=tools tools/benchmark_inference.jl <checkpoint> cpu examples/data/parcel_reference.json 1 30 <output> --python-reference` も2fresh process逐次実行/exit0。source7867e7c、開始時tracked worktree clean。
+- 同M2 Max/12cores/96GiB/macOS26.5.2/Julia1.13.1/PyTorch2.14.0/Accelerate0.7.0、AC接続。F32/real0.8B/parcelB1L256active101、全256列、readout/CPU score返却込み、load/compile/tokenization除外、30samples×2fresh processes、host非隔離/affinityなし。新source最適化は行っていない。
+- CPU PyTorch1 median583.570/588.584ms（p95601.821/613.187ms）、PyTorch8 median3904.427/3977.236ms（p954062.408/12103.612ms、run2max14881.207ms）。このhost/inputでは8が遅い。run2の外れ値原因は未調査で、PyTorch一般のthread scalingと扱わない。未調整runtime情報でもPyTorch intra-op8/inter-op12、OMP_NUM_THREADS未設定。「スレッド無指定＝1」ではない。
+- Julia1/Accelerate1 median659.679/781.668ms（p95713.166/931.495ms）。Julia8/Accelerate自動 median402.669/411.071ms（p95425.608/998.798ms）。追加Julia1/Accelerate自動 median552.929/550.296ms（p95834.346/971.668ms）。この条件ではJulia8側が速く、Julia1＋BLAS並列だけが最善とは言えない。両自動設定でLBT報告8/Accelerate報告12、各演算の実稼働thread数は未計測。PyTorch8とequal-thread-budget比較ではない。
+- Julia8自動のwarm heap847,294,512bytes/28,367allocations、Julia1自動803,619,600bytes/22,337allocations。両run maxerror6.67572e-6で独立参照guard通過。追加groupもshape/mask/full compute length/sample/profile/BLAS/Accelerate設定が元Julia8と一致することをassertした。これはJulia heapでありnative BLAS内部allocationの計測ではない。
+- 再測定GPU MPS medians264.776/263.450ms、Metal93.773/94.096msも完了。全7groups×2runs×30samplesを確認。raw JSON/log/runtime/hash/hardware/summaryはignored `artifacts/benchmarks/mac-M-series-20261001T081746Z/`。追加Julia1自動は `cpu-one-auto-julia-run{1,2}.{json,log}`、guard/summary追記scriptは `add_cpu_one_auto.jl`。既存driver/reportのsourceは変更せず、summaryJSON/Markdownへ追加groupを保存した。
+
 ## 2026-10-01: M2 Max の MPSCommandBuffer 再利用を修正
 
 - `ext/JeffClientMetalExt.jl` のtask-local MPS wrapper cacheを削除し、Layaと同様にencodeごとに `MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))` を作る。Metalのcommand batchingと、GPU完了まで配列/tensor-data/commandを `record_operation!` で保持する処理は維持。不要なreadback/例外cleanupのcache clearと古いcache identity検証も削除。
