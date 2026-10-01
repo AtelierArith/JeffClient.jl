@@ -169,3 +169,71 @@ end
         JeffClient.BLAS.set_num_threads(previous_threads)
     end
 end
+
+@testset "CPU projection thread policy task-local lifetime" begin
+    key = :jeff_cpu_projection_blas_threads
+    withenv(
+        "JEFF_CPU_PARALLEL_PROJECTIONS" => "1",
+        "JEFF_CPU_PROJECTION_THREAD_SCOPE" => "1",
+    ) do
+        saved = get(task_local_storage(), key, nothing)
+        actual = JeffClient.BLAS.get_num_threads()
+        @test JeffClient.cpu_projection_scope(
+            () -> JeffClient.cpu_projection_blas_threads(),
+        ) == actual
+        @test get(task_local_storage(), key, nothing) === saved
+        @test_throws ErrorException JeffClient.cpu_projection_scope(
+            () -> error("policy lifetime test"),
+        )
+        @test get(task_local_storage(), key, nothing) === saved
+        task_local_storage(key, 123) do
+            @test JeffClient.cpu_projection_scope(
+                () -> JeffClient.cpu_projection_blas_threads(),
+            ) == actual
+            @test task_local_storage(key) == 123
+            tasks = [
+                Threads.@spawn JeffClient.cpu_projection_scope(
+                    () -> JeffClient.cpu_projection_blas_threads(),
+                ) for _ = 1:2
+            ]
+            @test all(fetch(task) == actual for task in tasks)
+            @test task_local_storage(key) == 123
+        end
+        @test get(task_local_storage(), key, nothing) === saved
+    end
+end
+
+@testset "CPU full-attention head ownership and mask" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    attention = last(backend.layers).attention
+    cfg = backend.config
+    previous_threads = JeffClient.BLAS.get_num_threads()
+    try
+        JeffClient.BLAS.set_num_threads(1)
+        for n in (1, 9, 65, 129), holes in (false, true)
+            x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
+            mask = ones(Int64, n)
+            holes && n > 1 && (mask[1:3:(n-1)] .= 0)
+            saved_x, saved_mask = copy(x), copy(mask)
+            expected = withenv("JEFF_CPU_PARALLEL_FULL_HEADS" => "0") do
+                JeffClient.full_attention(attention, x, mask, cfg)
+            end
+            withenv("JEFF_CPU_PARALLEL_FULL_HEADS" => "1") do
+                tasks = [
+                    Threads.@spawn JeffClient.full_attention(attention, x, mask, cfg)
+                    for _ = 1:2
+                ]
+                @test all(
+                    isapprox(fetch(task), expected; atol = 2e-5, rtol = 2e-5) for
+                    task in tasks
+                )
+                GC.gc(true)
+                @test JeffClient.full_attention(attention, x, mask, cfg) ≈ expected atol=2e-5 rtol=2e-5
+                @test x == saved_x
+                @test mask == saved_mask
+            end
+        end
+    finally
+        JeffClient.BLAS.set_num_threads(previous_threads)
+    end
+end

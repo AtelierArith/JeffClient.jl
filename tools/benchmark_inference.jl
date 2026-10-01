@@ -107,6 +107,10 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_parallel_full_heads_enabled"] =
+                get(ENV, "JEFF_CPU_PARALLEL_FULL_HEADS", "0") == "1"
+            result["cpu_projection_thread_scope_enabled"] =
+                get(ENV, "JEFF_CPU_PROJECTION_THREAD_SCOPE", "0") == "1"
             result["cpu_parallel_projections_enabled"] =
                 get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") == "1"
             result["model_retained_julia_bytes"] = Base.summarysize(backend)

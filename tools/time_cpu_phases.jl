@@ -1,5 +1,12 @@
 using JeffClient, LinearAlgebra, Statistics
-import AppleAccelerate, JSON
+import JSON
+if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
+    import AppleAccelerate
+end
+if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
+    import LoopVectorization
+    @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
+end
 
 function phase_layer(layer, hidden, mask, cfg, mlp_buffers, delta_buffers, final)
     pre = @timed JeffClient.native_rms(hidden, layer.input_norm, cfg.eps)
@@ -19,8 +26,8 @@ function phase_layer(layer, hidden, mask, cfg, mlp_buffers, delta_buffers, final
     residual, normalized = post.value
     gate, up = mlp_buffers
     projections = @timed begin
-        mul!(gate, transpose(layer.mlp.gate), normalized)
-        mul!(up, transpose(layer.mlp.up), normalized)
+        JeffClient.cpu_projection!(gate, layer.mlp.gate, normalized)
+        JeffClient.cpu_projection!(up, layer.mlp.up, normalized)
     end
     activation = @timed JeffClient.cpu_owned_mlp_gate!(gate, up)
     down = @timed JeffClient.native_linear(layer.mlp.down, activation.value)
@@ -30,6 +37,12 @@ function phase_layer(layer, hidden, mask, cfg, mlp_buffers, delta_buffers, final
 end
 
 function phase_pass(backend, ids, mask)
+    return JeffClient.cpu_projection_scope() do
+        phase_pass_unscoped(backend, ids, mask)
+    end
+end
+
+function phase_pass_unscoped(backend, ids, mask)
     cfg = backend.config
     hidden = JeffClient.native_gather(backend.embedding, ids)
     workspace = JeffClient.cpu_mlp_workspace(backend.layers, length(ids))
@@ -53,7 +66,7 @@ end
 
 function main()
     length(ARGS) == 2 || error("Usage: time_cpu_phases.jl CHECKPOINT REFERENCE")
-    BLAS.set_num_threads(8)
+    BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
     backend = NativeBackend(ARGS[1])
     sample = only(JSON.parsefile(ARGS[2]))
     ids = Int64.(only(sample["inputs"]["input_ids"]))

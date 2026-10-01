@@ -101,6 +101,36 @@ guards, ownership and independent tiny-model checks;
 `tools/compare_cpu_vector_math.jl` and `tools/compare_parallel_gemm.jl` are
 microbenchmarks, not substitutes for full inference measurements.
 
+### Forward thread policy and full-attention head experiment
+
+Two further opt-ins avoid overhead without changing global BLAS settings:
+`JEFF_CPU_PROJECTION_THREAD_SCOPE=1` snapshots the current BLAS thread count
+inside one CPU forward using task-local storage, restoring any previous value
+even on an exception. It requires parallel projections to be enabled; direct
+projection calls outside the scope still check BLAS normally. BLAS configuration
+must remain unchanged while any forward is running.
+
+`JEFF_CPU_PARALLEL_FULL_HEADS=1` parallelizes ordinary full-attention heads
+only for at least 16 tokens, multiple available workers, and single-threaded
+BLAS. Workers read shared Q/K/V/gate/mask and own distinct output head rows
+and private scores/probabilities. Q/K/V views avoid head materialization.
+The final-query-only path and generic/GPU paths keep their previous computation.
+Short sequences and multithreaded BLAS fall back to the original head loop.
+
+With both flags added to the portable configuration above, 20 warm forwards
+measured **319.04 ms median / 345.54 ms p95**, with 271,369,904 Julia heap bytes
+and 12,671 allocations (`artifacts/cpu-tuning/full-heads-parallel.json`).
+This is approximately **1.55× the original baseline, not 2×**. Scope alone
+measured 356.96 ms, but its small latency difference needs stronger repeat
+evidence before attributing the whole gain to that change.
+An independent 30-call repeat measured **318.66 ms median / 333.54 ms p95**
+with identical heap figures and maximum reference logit error `1.05e-5`.
+Model-retained memory was 3.01 GB and process peak RSS 5.31 GB in that repeat.
+The full test suite passed, including mask/length, simultaneous head calls,
+input preservation, GC reuse, and task-local policy restoration tests.
+JET reported no errors for the inspected real-model forward; its warmed
+profile measured 300.78 ms, but is not a substitute for the benchmark trial.
+
 ## Real 0.8B checkpoint: the README demo
 
 These benchmarks use **Jeff's actual trained 0.8B weights**, not the tiny test

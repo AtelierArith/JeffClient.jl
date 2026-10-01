@@ -21,6 +21,70 @@ function cpu_projection_block!(output, weight, input, rows)
     return nothing
 end
 
+function cpu_projection_blas_threads()
+    scoped = get(task_local_storage(), :jeff_cpu_projection_blas_threads, nothing)
+    return scoped isa Int ? scoped : BLAS.get_num_threads()
+end
+
+function cpu_projection_scope(f::F) where {F}
+    if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
+       get(ENV, "JEFF_CPU_PROJECTION_THREAD_SCOPE", "0") != "1"
+        return f()
+    end
+    # Immutable policy owned by this task/forward, restored by Base even on
+    # exceptions. BLAS configuration must not change during a running forward.
+    return task_local_storage(f, :jeff_cpu_projection_blas_threads, BLAS.get_num_threads())
+end
+
+function cpu_full_heads!(heads, out, q, k, v, qgate, scores_mask, cfg)
+    groups = cfg.heads ÷ cfg.kv_heads
+    for head in heads
+        kv = cld(head, groups)
+        scores =
+            native_matmul(transpose(@view(k[:, kv, :])), @view(q[:, head, :])) ./
+            sqrt(Float32(cfg.head_dim)) .+ scores_mask
+        probabilities = exp.(scores .- maximum(scores; dims = 1))
+        probabilities ./= sum(probabilities; dims = 1)
+        values = native_matmul(@view(v[:, kv, :]), probabilities)
+        gate = native_sigmoid.(@view(qgate[(cfg.head_dim+1):end, head, :]))
+        @views out[((head-1)*cfg.head_dim+1):(head*cfg.head_dim), :] .= values .* gate
+    end
+    return nothing
+end
+
+function native_full_heads!(out::Matrix{Float32}, q, k, v, qgate, scores_mask, cfg)
+    workers = min(Threads.nthreads(:default), cfg.heads)
+    if get(ENV, "JEFF_CPU_PARALLEL_FULL_HEADS", "0") != "1" ||
+       workers <= 1 ||
+       size(out, 2) < 16 ||
+       cpu_projection_blas_threads() != 1
+        return invoke(
+            native_full_heads!,
+            Tuple{Any,Any,Any,Any,Any,Any,Any},
+            out,
+            q,
+            k,
+            v,
+            qgate,
+            scores_mask,
+            cfg,
+        )
+    end
+    @sync for worker = 1:workers
+        Threads.@spawn cpu_full_heads!(
+            worker:workers:cfg.heads,
+            out,
+            q,
+            k,
+            v,
+            qgate,
+            scores_mask,
+            cfg,
+        )
+    end
+    return out
+end
+
 function cpu_projection!(output, weight, input)
     size(input, 1) == size(weight, 1) &&
     size(output) == (size(weight, 2), size(input, 2)) ||
@@ -31,9 +95,9 @@ function cpu_projection!(output, weight, input)
     workers = min(Threads.nthreads(:default), size(output, 1))
     if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
        workers == 1 ||
-       BLAS.get_num_threads() != 1 ||
        size(output, 1) < 256 ||
-       length(output) * size(input, 1) < 1_000_000
+       length(output) * size(input, 1) < 1_000_000 ||
+       cpu_projection_blas_threads() != 1
         return mul!(output, transpose(weight), input)
     end
     @sync for worker = 1:workers
@@ -422,6 +486,12 @@ function cpu_convolution!(output, input, weight)
 end
 
 function native_hidden_forward(hidden::Matrix{Float32}, layers, mask, final_norm, cfg)
+    return cpu_projection_scope() do
+        cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
+    end
+end
+
+function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
     isempty(layers) && return native_rms(hidden[:, end:end], final_norm, cfg.eps)
     workspace = cpu_mlp_workspace(layers, size(hidden, 2))
     delta_buffers = cpu_delta_workspace(cfg, size(hidden, 2))

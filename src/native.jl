@@ -228,6 +228,11 @@ function full_attention(attention, x, mask, cfg)
         ],
     )
     out = similar(x, cfg.head_dim * cfg.heads, length)
+    native_full_heads!(out, q, k, v, qgate, scores_mask, cfg)
+    return native_linear(attention.out, out)
+end
+
+function native_full_heads!(out, q, k, v, qgate, scores_mask, cfg)
     groups = cfg.heads ÷ cfg.kv_heads
     for head = 1:cfg.heads
         kv_head = cld(head, groups)
@@ -240,7 +245,7 @@ function full_attention(attention, x, mask, cfg)
         gate = native_sigmoid.(qgate[(cfg.head_dim+1):end, head, :])
         out[((head-1)*cfg.head_dim+1):(head*cfg.head_dim), :] .= values .* gate
     end
-    return native_linear(attention.out, out)
+    return out
 end
 
 function causal_depthwise(input, weight)
