@@ -25,6 +25,47 @@
     )
 end
 
+@testset "CPU full-sequence reference forward" begin
+    path = joinpath(@__DIR__, "fixtures", "native")
+    backend = NativeBackend(path)
+    defaults = JeffClient.cpu_settings()
+    for workspace in (false, true)
+        JeffClient.with_cpu_settings(
+            :trim_padding => false,
+            :final_query => false,
+            :final_token_only => false,
+            :recurrent_delta => false,
+            :mlp_workspace => workspace,
+        ) do
+            for sample in JSON.parsefile(joinpath(path, "reference.json"))
+                inputs = Dict(
+                    name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for
+                    (name, rows) in sample["inputs"]
+                )
+                expected =
+                    reduce(vcat, [permutedims(Float32.(row)) for row in sample["logits"]])
+                saved = deepcopy(inputs)
+                actual = logits(backend, inputs)
+                retained = copy(actual)
+                GC.gc(true)
+                @test actual ≈ expected atol=2e-5 rtol=2e-5
+                @test logits(backend, inputs) ≈ expected atol=2e-5 rtol=2e-5
+                @test actual == retained
+                @test inputs == saved
+                @test all(axes(inputs["input_ids"], 1)) do row
+                    JeffClient.native_sequence_start(
+                        backend.embedding,
+                        inputs["attention_mask"],
+                        row,
+                    ) == 1
+                end
+            end
+        end
+    end
+    @test JeffClient.cpu_settings() == defaults
+    @test defaults.final_token_only
+end
+
 @testset "CPU forward-local scratch ownership" begin
     backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
     samples = JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))

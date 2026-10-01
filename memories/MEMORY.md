@@ -890,3 +890,41 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 比較用切替は内部with_cpu_settingsのtask-localなscopeへ置換（公開設定APIではない）。Function/VarargはF/Nで特殊化。workerにはimmutable policyを明示伝播し、chunk/recurrent/parallel参照比較が実際に異なる経路を通ることを維持する。古い変数を設定しても無視されるregression testとscope成功/例外復元8checks追加。
 - CPU environmentなし、Intel i9-9900K/Julia1.13.1/Float32/real0.8B/parcel B1L256active101/Julia8/OpenBLAS1の30warm samples median293.433ms/p95316.923ms/103,849,264heap bytes/12,922allocations/maxerror1.2398e-5（cpu-defaults.json）。元7ccfe19 repeat293.934msと同程度。policy伝播で小さなheap増があり0allocationとは扱わない。model load/compileを通常推論から除外。
 - JET core+LV No errors detected、warm283.652ms/103,846,704bytes/GC0、Profile/Allocs5%取得（profile-cpu-defaults.log）。全test suite exit0（cpu-defaults-tests.log）。activation126/block18496/native651checksが1/8worker両方exit0（cpu-defaults-{validation,single-worker}.log）。JuliaFormatter整形とdiff check済み。Apple M4/Linuxの新auto-loader実機再測定は未実施、過去のM4結果の汎用保証はしない。
+
+## 2026-10-01: Linux Xeon CPU benchmark / automatic defaults
+
+- ユーザーのCPU計測依頼。source `fddc576013bf1f6971bc7ffdcd901c7d3c44ccab`、測定時tracked worktree clean。実機はIntel Xeon E5-2699 v3 / 18 physical cores・36 logical CPUs / x86_64 Linux / Julia1.13.1。以前のi9/macOS・M4の値とは直接速度比較しない。
+- `Pkg.instantiate(; workspace=true)` で依存を準備し、`resolve_checkpoint`でpinned Jeff0.8B revision `0f212b3e72acb4dde3f7da61e925d6ab7f819990`をScratchへ取得。real weights/Float32/parcel reference case1/B1L256active101、readoutとCPU score返却込み、download/import/load/初回compile/tokenization除外。既存 `tools/benchmark_inference.jl`、30samples/evals1、別process逐次実行。
+- CPU自動portable policy、Julia8/OpenBLAS1。LoopVectorization0.12.174のportable SiLU/gate/vector blocksは有効、Octavian・explicit SIMDは無効。BenchmarkTools1.8.0、OpenBLAS_jll0.3.30+0。Octaveという依存ではなくOctavianが比較用のoptional依存であり、今回の推論では使わない。
+- run1: median448.356783ms / p95641.087973ms / min424.765486ms / max641.477599ms。ばらつきを受け同条件repeat: median641.8124805ms / p95799.071833ms / min438.434235ms / max803.772692ms。速いrunだけを安定した性能値として採用しない。両方heap95,672,592bytes（91.2405MiB）/12,842allocations、saved independent PyTorch reference guard通過、max logit error1.2397766e-5。
+- load3.2220/3.1751s、first forward21.3870/21.1470s。retained model3,010,637,944bytes、process peak RSS4,356,997,120/4,429,197,312bytes。peakはstartup/load/compile込み、warm heap allocationとは別指標。
+- hostは他workloadから隔離していない。CPU affinity0–35、CPU0 governor schedutil、process/ancestor cgroupsはcpu.max=`max 100000`・nr_throttled=0。別のCPU使用processが観測されたが、run間差の原因は未特定。環境設定を変更せず両結果を記録した。
+- 集約JSON `docs/src/assets/benchmarks/cpu-2026-10-01-fddc576-linux-xeon.json`、条件・全再現commandは `docs/src/performance.md`。個別JSON/stdout/setup/download logs/Manifest/lscpu/cgroup snapshotはignored `artifacts/benchmarks/cpu-2026-10-01-fddc576/`。推論source変更はなく、実モデル参照guardと記録の整合性を確認する。
+
+## 2026-10-01: Linux Xeon / requested Octavian chunk path
+
+- ユーザー指定 `octavian_delta=true` / `recurrent_delta=false` をinternal `with_cpu_settings` scopeで測定。`using JeffClient, Octavian`後にscope内で既存 `tools/benchmark_inference.jl` をincludeする。mainの `initialize_cpu!()` はglobal defaultsを再初期化するが、task-local scopeは保持される。workerにもpolicyが伝播する。benchmark前のflags/extensionと終了後のdefaults復元をassertし、両process exit0。
+- 同fddc576/real0.8B/pinned revision/Float32/parcel B1L256active101/Julia8/OpenBLAS1、chunk64、他policyは既定のまま。state128×128、chunk full64/tail37でextensionの寸法guardを満たし、worker-local state product2箇所が `Octavian.matmul_serial!` を使う。MLP/その他GEMMはOpenBLASのまま。Octavian0.3.29。
+- requested30samples: median753.9773705ms / p95881.313247ms / min684.412186ms / max886.270485ms、114,761,392heap bytes /22,536allocations、max logit error1.1444092e-5。chunk方式を保持してoctavianだけfalseの別process逐次control30samples: median752.4623015ms /p95881.499424ms /min724.976491ms /max882.363954ms、114,706,096bytes /21,384allocations、maxerror1.335144e-5。両run saved independent reference guard通過、recorded cpu_*差はoctavian_deltaのみ。
+- このpairのOctavian中央値は約0.201%高く、速度改善は確認できない。以前のdefault recurrent448/642msとの比較はrun間のばらつきとアルゴリズム変更を含むため、Octavian単独の効果と扱わない。default変更・新規最適化は行わない。
+- JSON `docs/src/assets/benchmarks/cpu-2026-10-01-fddc576-linux-xeon-octavian.json`、再現commandはperformance.mdのLinux/Octavian節、個別JSON/logsと既存Octavian専用検証logはignored `artifacts/benchmarks/cpu-2026-10-01-fddc576/`。
+- 既存 `tools/verify_cpu_octavian.jl` は144/144checks、exit0。state/RHS入力保持、view/Matrix/Transpose、beta0のNaN出力上書きを検証。`@code_warntype`の戻り値はMatrix{Float32}。
+
+## 2026-10-01: CUDA.jl / ONNX CUDA verification on Linux
+
+- ユーザー依頼のCUDA検証。root/tools依存は変更せず、ignored `artifacts/cuda-validation/env` へlocal JeffClient/CUDA6.4.1/cuDNN6.4.1を導入。ONNXRunTime1.4.0はroot workspaceと同version。runtime自動選択13.4.0。
+- 実機RTX3060×2、loaded NVIDIA kernel module580.173.02、system libcuda/libnvidia-ml580.178.04。`nvidia-smi`はNVML driver/library version mismatch。CUDA.functional()=false、functional(true)/CuArray broadcast→synchronize→ArrayのprobeはCUDA error804 COMPAT_NOT_SUPPORTED_ON_DEVICE、device countはerror3 NOT_INITIALIZED。
+- `using CUDA` + cuDNN import後、ONNXBackend(:cuda)のfixture session作成はCUDA not functionalで失敗。同fixture CPU sessionは非正方Float32入力2×3のidentityと一致。実モデル0.8BのCUDA forward/exportは行っておらず、GPUモデル対応済みとは扱わない。
+- ONNXRunTime1.4.0 sourceのruntime範囲は>=12.0/<13.0で、自動選択13.4も不適合。再検証にはdriver整合性とCUDA12 runtimeが必要。システムdriver変更/再起動は行わない。
+- NativeBackend(fixture; device=:cuda)も実際に呼び出し、CUDAimport済みでもUnsupported native device Val{:cuda}で失敗。src/native.jlとProject.toml/extにCUDA native extensionはなく、ONNXCUDA providerとNative Julia CUDA対応は別事項。
+- 集約JSON `docs/src/assets/benchmarks/cuda-2026-10-01-fddc576-linux.json`、解説docs/src/inference.md。setup/probeログ・Manifest・original reportはignored artifacts/cuda-validation/に保存。
+
+## Linux Python comparison and full-sequence benchmark (2026-10-01)
+
+- Original Python CPU through PythonCall initially failed because installed FLA selected GPU Triton. Process-only `inspect.unwrap` selection of Transformers' original torch chunk/recurrent functions plus `USE_HUB_KERNELS=NO` succeeds; no Python source/environment edits. Python3.12.3/PyTorch2.14.0+cu130/Transformers5.17.0/FLA0.5.2, Jeff f067882.
+- Same real Float32 B1 parcel case: Python full256 median808.495ms/p95812.716; cropped101 median432.196/p95434.206. Fresh default Julia8/BLAS1 (computed101) median652.822/p95813.772. The apparent1.24x padded-Python ratio is unequal work.
+- Default Julia1/BLAS8 median945.116/p95975.633; Octavian chunk1/8 median974.025/p951027.077. Both slower than corresponding8/1 trials; no general threading conclusion beyond this host/input.
+- Added CPU-only `tools/benchmark_inference.jl --python-reference`: task-local trim=false, final_query=false, new final_token_only=false, recurrent=false, Octavian=false, chunk64. New full-sequence branch computes all final MLP/RMS columns before last-token readout; production default final_token_only=true remains. Full suite passed including52 new independent-reference/GC/workspace/ownership/restoration checks. JuliaFormatter applied.
+- Full256 reference profile Julia1/BLAS8 median1797.095ms/p951969.846, heap378678568bytes/20951allocations, error1.2397766e-5. Python808.495ms =>Python2.22x faster. Unpinned affinity0-35, unisolated host, sequential separate processes; kernels/batching/harness still differ. Raw JSON and source hashes saved in docs asset.
+- Results consolidated in docs/src/profiling.md; performance.md now describes configuration and links to results. Historical CPU/Metal results and allocation investigations retained in collapsed sections.
+- Full-sequence fixture `@code_warntype` returns Matrix{Float32}; JET optimization report: No errors detected. Warm fixture cumulative Julia heap33376bytes measured separately.

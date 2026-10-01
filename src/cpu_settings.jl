@@ -15,6 +15,7 @@ function cpu_defaults(apple::Bool)
         delta_workspace = portable,
         delta_projection_workspace = portable,
         final_query = portable,
+        final_token_only = true,
         mlp_residual_fusion = portable,
         parallel_heads = true,
         mlp_workspace = true,

@@ -602,7 +602,11 @@ function native_hidden_forward(hidden::Matrix{Float32}, layers, mask, final_norm
 end
 
 function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
-    isempty(layers) && return native_rms(hidden[:, end:end], final_norm, cfg.eps)
+    if isempty(layers)
+        return cpu_setting(:final_token_only) ?
+               native_rms(hidden[:, end:end], final_norm, cfg.eps) :
+               native_rms(hidden, final_norm, cfg.eps)[:, end:end]
+    end
     workspace = cpu_mlp_workspace(layers, size(hidden, 2))
     delta_buffers = cpu_delta_workspace(cfg, size(hidden, 2))
     projections = cpu_delta_projection_workspace(cfg, size(hidden, 2))
@@ -705,6 +709,22 @@ function cpu_hidden_forward(
     delta_buffers,
     projections = nothing,
 )
+    if !cpu_setting(:final_token_only)
+        # Match a backbone that computes every position through the final MLP
+        # and final normalization, then selects the last token for readout.
+        for layer in layers
+            hidden = cpu_layer_with_mlp_workspace(
+                layer,
+                hidden,
+                mask,
+                cfg,
+                workspace === nothing ? nothing : workspace.full,
+                delta_buffers,
+                projections,
+            )
+        end
+        return native_rms(hidden, final_norm, cfg.eps)[:, end:end]
+    end
     for index = 1:(length(layers)-1)
         hidden = cpu_layer_with_mlp_workspace(
             layers[index],

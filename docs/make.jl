@@ -18,7 +18,7 @@ makedocs(;
         "Models and export" => "models.md",
         "Inference" => "inference.md",
         "Performance" => "performance.md",
-        "Profiling and tuning" => "profiling.md",
+        "Profiling and measurements" => "profiling.md",
         "API reference" => "api.md",
         "Development" => "development.md",
     ],

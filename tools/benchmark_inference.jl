@@ -41,29 +41,28 @@ function synchronized_logits(backend::ONNXBackend, inputs, device)
     return backend.session(inputs, [backend.output_name])[backend.output_name]
 end
 
-function main()
-    length(ARGS) in 3:6 || error(
-        "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON]",
+function run_benchmark(args, profile)
+    length(args) in 3:6 || error(
+        "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON] [--python-reference]",
     )
-    device = Symbol(ARGS[2])
+    device = Symbol(args[2])
     device in (:cpu, :metal, :onnx) || error("Choose cpu, metal, or onnx.")
-    index = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 1
-    samples = length(ARGS) >= 5 ? parse(Int, ARGS[5]) : 10
+    index = length(args) >= 4 ? parse(Int, args[4]) : 1
+    samples = length(args) >= 5 ? parse(Int, args[5]) : 10
     samples >= 3 || error("Use at least three measurement samples.")
-    output = length(ARGS) >= 6 ? ARGS[6] : nothing
+    output = length(args) >= 6 ? args[6] : nothing
     if device == :metal
         Metal.functional() || error("A functional Apple GPU is required.")
         Metal.allowscalar(false)
     end
-    JeffClient.initialize_cpu!()
-    references = JSON.parsefile(ARGS[3])
+    references = JSON.parsefile(args[3])
     cases = references isa AbstractDict ? references["cases"] : references
     sample = cases[index]
     rows_to_matrix(rows, T) = reduce(vcat, [permutedims(T.(row)) for row in rows])
     inputs = Dict(name => rows_to_matrix(rows, Int64) for (name, rows) in sample["inputs"])
     expected = rows_to_matrix(sample["logits"], Float32)
     model_load = @elapsed backend =
-        device == :onnx ? load_export(ARGS[1]) : NativeBackend(ARGS[1]; device)
+        device == :onnx ? load_export(args[1]) : NativeBackend(args[1]; device)
     try
         first_call = @elapsed actual = synchronized_logits(backend, inputs, device)
         max_error = maximum(abs.(actual .- expected))
@@ -79,6 +78,7 @@ function main()
         median_estimate = BenchmarkTools.median(trial)
         sorted_ms = sort(trial.times ./ 1e6)
         result = Dict(
+            "comparison_profile" => String(profile),
             "backend" => String(device),
             "julia_version" => string(VERSION),
             "machine" => Sys.MACHINE,
@@ -125,6 +125,8 @@ function main()
             result["cpu_recurrent_delta_enabled"] = JeffClient.cpu_setting(:recurrent_delta)
             result["cpu_octavian_delta_enabled"] = JeffClient.cpu_setting(:octavian_delta)
             result["cpu_final_query_enabled"] = JeffClient.cpu_setting(:final_query)
+            result["cpu_final_token_only_enabled"] =
+                JeffClient.cpu_setting(:final_token_only)
             result["cpu_simd_enabled"] = JeffClient.cpu_setting(:simd)
             result["cpu_parallel_heads_enabled"] = JeffClient.cpu_setting(:parallel_heads)
             result["julia_worker_threads"] = Threads.nthreads(:default)
@@ -209,6 +211,29 @@ function main()
     finally
         device == :onnx && close(backend)
     end
+end
+
+function main(args = ARGS)
+    profile = "--python-reference" in args ? :python_reference : :default
+    positional = filter(!=("--python-reference"), args)
+    length(positional) in 3:6 || error(
+        "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON] [--python-reference]",
+    )
+    JeffClient.initialize_cpu!()
+    if profile == :python_reference
+        positional[2] == "cpu" || error("--python-reference is only supported for CPU.")
+        return JeffClient.with_cpu_settings(
+            :trim_padding => false,
+            :final_query => false,
+            :final_token_only => false,
+            :recurrent_delta => false,
+            :octavian_delta => false,
+            :delta_chunk_size => 64,
+        ) do
+            run_benchmark(positional, profile)
+        end
+    end
+    return run_benchmark(positional, profile)
 end
 
 main()

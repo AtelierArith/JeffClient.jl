@@ -18,7 +18,7 @@ required by this inference API. ONNX Runtime itself is a native library.
 
 - [Models and ONNX export](models.md)
 - [Inference and accelerators](inference.md)
-- [Measured performance](performance.md)
-- [Profiling and Metal tuning](profiling.md)
+- [CPU configuration and benchmarking](performance.md)
+- [Profiling and measurements](profiling.md)
 - [API reference](api.md)
 - [Development](development.md)

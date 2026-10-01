@@ -115,6 +115,12 @@ constructing `ONNXBackend(...; execution_provider=:cuda)`. Compatibility depends
 on ONNXRunTime's CUDA runtime requirements and the graph's operators. Other
 providers are not currently exposed by this package.
 
+Native Julia CUDA inference is not implemented: `NativeBackend(...; device=:cuda)`
+rejects the device even after importing CUDA. Native GPU execution uses Metal.
+ONNXRunTime.jl 1.4.0 requires a functional CUDA 12.x runtime. The Linux GPU
+verification was blocked by driver initialization; results and environment
+conditions are recorded in [Profiling and measurements](profiling.md#CUDA-/-ONNX-Runtime-verification).
+
 ## Native Julia model and Metal
 
 The text-only Qwen3.5 forward pass loads source safetensors directly: embeddings,
