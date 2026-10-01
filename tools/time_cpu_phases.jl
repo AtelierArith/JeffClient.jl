@@ -75,7 +75,7 @@ function phase_pass_unscoped(backend, ids, mask)
     projections = JeffClient.cpu_delta_projection_workspace(cfg, length(ids))
     records = []
     for (i, layer) in enumerate(backend.layers)
-        final = i == length(backend.layers)
+        final = i == length(backend.layers) && JeffClient.cpu_setting(:final_token_only)
         buffers = final ? workspace.final : workspace.full
         hidden, times, bytes =
             phase_layer(layer, hidden, mask, cfg, buffers, delta, final, projections)
@@ -98,7 +98,7 @@ function main()
     sample = only(JSON.parsefile(ARGS[2]))
     ids = Int64.(only(sample["inputs"]["input_ids"]))
     mask = Int64.(only(sample["inputs"]["attention_mask"]))
-    start = findfirst(!iszero, mask)
+    start = JeffClient.cpu_setting(:trim_padding) ? findfirst(!iszero, mask) : 1
     ids, mask = ids[start:end], mask[start:end]
     expected = Float32.(only(sample["logits"]))
     phase_pass(backend, ids, mask)

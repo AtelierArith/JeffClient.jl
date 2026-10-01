@@ -180,7 +180,57 @@ benchmarked source layout and change methods/settings only in isolated processes
 
 ## Linux CPU results (2026-10-01)
 
-### Model, input and automatic CPU policy
+### Current matched comparison and allocation investigation
+
+The current eight-physical-core comparison and reproduction commands are in
+[Performance](performance.md). Three fresh Julia/MKL runs have medians
+767.658/771.419/795.975 ms, versus paired Python/PyTorch
+812.884/809.849/805.778 ms. All 255 saved reference logits pass with maximum
+error `1.04904e-5`. The third Julia p95 remains higher than Python's.
+
+Before optimization, Julia's diagnostic phase profile concentrated time in
+Delta attention and scalar activation fallbacks. A separate PyTorch profile
+spent 553.0 of 807.3 ms (68.5%) in GEMM and 59.3 ms in batched GEMM. These
+are single-forward diagnostic measurements, not matched benchmark medians.
+The measured Python advantage was largely in compiled kernels and array
+layout; Python interpreter overhead did not dominate this profile.
+
+Julia improvements include guarded SIMD with scalar repair of exceptional
+lanes, contiguous `(width, sequence, head)` Delta storage, in-place softmax,
+and forward-owned RMS/residual/full-attention buffers. RoPE tables are reused
+within a forward; parallel heads have separate score/value scratch. Reusing
+these buffers retains caller input, model weights and returned score ownership.
+
+| Development stage | Estimated heap bytes / forward | Median / p95 (ms) |
+|---|---:|---:|
+| SIMD / packed Delta / in-place softmax | 324,399,376 | 790.924 / 1006.678 |
+| Add RMS/residual reuse | 249,627,968 | 790.073 / 971.406 |
+| Add full-attention workspace | 97,363,280 | 794.927 / 925.063 |
+| Also normalize owned Delta output in place | 58,739,024 | 766.207 / 804.539 |
+
+These are sequential development trials with MKL1/Julia8, full256/chunk64,
+10 warm-ups and 30 samples. They collected GC **after** warm-up; the current
+matched driver collects it **before** warm-up on both sides. Do not combine
+their ratios with the current Python table. RMS/full-attention reuse chiefly
+reduced allocation; the last step also improved latency in this experiment.
+The [current evidence JSON](assets/benchmarks/linux-cpu-2026-10-01-matched-mkl.json)
+retains the development timing/GC series separately from the final comparison.
+
+Before buffer reuse, slow samples of 1006.7/1110.3 ms included
+134.8/141.5 ms of reported GC. After reuse the final three runs report median
+GC zero and maximum 12.6–16.9 ms, while their slowest samples report GC zero.
+Allocation/GC explains part of the older tail; it does not explain all latency
+variation. Heap allocation is cumulative allocation traffic, separate from
+retained model memory and process RSS.
+
+The updated native path passes the full test suite, poisoned scratch and
+same-length mask changes, RoPE width/length checks, independent fixtures, GC
+and returned-score ownership checks. `@code_warntype` returns
+`Matrix{Float32}` and JET reports no errors; heap bytes are measured separately
+because stable types do not eliminate arrays. These checks cover CPU changes;
+Apple Silicon and CUDA results below retain their original measurement scope.
+
+### Earlier baseline: model, input and automatic CPU policy
 
 Source `fddc576013bf1f6971bc7ffdcd901c7d3c44ccab`, with a clean tracked worktree
 at measurement time, was measured on **Intel Xeon E5-2699 v3 / x86_64 Linux /

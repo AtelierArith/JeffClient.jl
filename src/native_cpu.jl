@@ -2,6 +2,7 @@
 native_conv_weights(::Val{:cpu}, weight) = transpose(permutedims(weight))
 cpu_portable_silu!(output) = false
 cpu_portable_gate!(gate, up) = false
+cpu_portable_softmax!(scores) = false
 function native_cpu_silu!(output)
     cpu_portable_silu!(output) && return output
     output .= native_silu.(output)
@@ -46,9 +47,11 @@ function cpu_full_heads!(heads, out, q, k, v, qgate, scores_mask, cfg)
         scores =
             native_matmul(transpose(@view(k[:, kv, :])), @view(q[:, head, :])) ./
             sqrt(Float32(cfg.head_dim)) .+ scores_mask
-        probabilities = exp.(scores .- maximum(scores; dims = 1))
-        probabilities ./= sum(probabilities; dims = 1)
-        values = native_matmul(@view(v[:, kv, :]), probabilities)
+        if !cpu_portable_softmax!(scores)
+            scores .= exp.(scores .- maximum(scores; dims = 1))
+            scores ./= sum(scores; dims = 1)
+        end
+        values = native_matmul(@view(v[:, kv, :]), scores)
         gate = native_sigmoid.(@view(qgate[(cfg.head_dim+1):end, head, :]))
         @views out[((head-1)*cfg.head_dim+1):(head*cfg.head_dim), :] .= values .* gate
     end
@@ -57,10 +60,7 @@ end
 
 function native_full_heads!(out::Matrix{Float32}, q, k, v, qgate, scores_mask, cfg)
     workers = min(Threads.nthreads(:default), cfg.heads)
-    if !cpu_setting(:parallel_full_heads) ||
-       workers <= 1 ||
-       size(out, 2) < 16 ||
-       cpu_projection_blas_threads() != 1
+    if !cpu_setting(:parallel_full_heads)
         return invoke(
             native_full_heads!,
             Tuple{Any,Any,Any,Any,Any,Any,Any},
@@ -73,19 +73,135 @@ function native_full_heads!(out::Matrix{Float32}, q, k, v, qgate, scores_mask, c
             cfg,
         )
     end
+    if workers <= 1 || size(out, 2) < 16 || cpu_projection_blas_threads() != 1
+        cpu_full_heads!(1:cfg.heads, out, q, k, v, qgate, scores_mask, cfg)
+        return out
+    end
+    settings = cpu_settings()
     @sync for worker = 1:workers
-        Threads.@spawn cpu_full_heads!(
-            worker:workers:cfg.heads,
-            out,
-            q,
+        Threads.@spawn with_cpu_settings(settings) do
+            cpu_full_heads!(worker:workers:cfg.heads, out, q, k, v, qgate, scores_mask, cfg)
+        end
+    end
+    return out
+end
+
+function cpu_full_workspace(cfg, n)
+    half = cfg.rotary_dim ÷ 2
+    frequencies = inv.(
+        cfg.rope_theta .^ (Float32.(0:2:(cfg.rotary_dim-1)) ./ Float32(cfg.rotary_dim)),
+    )
+    angles = frequencies .* permutedims(Float32.(0:(n-1)))
+    return (
+        qgate = zeros(Float32, 2cfg.head_dim * cfg.heads, n),
+        q = zeros(Float32, cfg.head_dim, cfg.heads, n),
+        k = zeros(Float32, cfg.head_dim * cfg.kv_heads, n),
+        v = zeros(Float32, cfg.head_dim * cfg.kv_heads, n),
+        out = zeros(Float32, cfg.head_dim * cfg.heads, n),
+        projected = zeros(Float32, cfg.hidden, n),
+        mask = zeros(Float32, n, n),
+        cosines = reshape(cos.(angles), half, n),
+        sines = reshape(sin.(angles), half, n),
+        heads = [
+            (scores = zeros(Float32, n, n), values = zeros(Float32, cfg.head_dim, n)) for
+            _ = 1:min(Threads.nthreads(:default), cfg.heads)
+        ],
+    )
+end
+
+function cpu_full_rms!(output, input, weight, eps)
+    width = size(output, 1)
+    for token in axes(output, 3), head in axes(output, 2)
+        scale = inv(sqrt(sum(abs2, @view(input[:, head, token])) / width + eps))
+        @inbounds @simd for row in axes(output, 1)
+            output[row, head, token] =
+                (input[row, head, token] * scale) * (1.0f0 + weight[row])
+        end
+    end
+    return output
+end
+
+function cpu_full_rope!(output, cosines, sines)
+    half = size(cosines, 1)
+    for token in axes(output, 3), head in axes(output, 2)
+        @inbounds @simd for row = 1:half
+            a, b = output[row, head, token], output[half+row, head, token]
+            cosine, sine = cosines[row, token], sines[row, token]
+            output[row, head, token] = a * cosine - b * sine
+            output[half+row, head, token] = b * cosine + a * sine
+        end
+    end
+    return output
+end
+
+function cpu_full_workspace_heads!(heads, q, k, v, qgate, cfg, buffers, scratch)
+    groups = cfg.heads ÷ cfg.kv_heads
+    for head in heads
+        kv = cld(head, groups)
+        scores, values = scratch
+        mul!(scores, transpose(@view(k[:, kv, :])), @view(q[:, head, :]))
+        scores .= scores ./ sqrt(Float32(cfg.head_dim)) .+ buffers.mask
+        if !cpu_portable_softmax!(scores)
+            scores .= exp.(scores .- maximum(scores; dims = 1))
+            scores ./= sum(scores; dims = 1)
+        end
+        mul!(values, @view(v[:, kv, :]), scores)
+        @views buffers.out[((head-1)*cfg.head_dim+1):(head*cfg.head_dim), :] .=
+            values .* native_sigmoid.(qgate[(cfg.head_dim+1):end, head, :])
+    end
+    return nothing
+end
+
+cpu_full_attention(attention, x, mask, cfg, ::Nothing) =
+    full_attention(attention, x, mask, cfg)
+function cpu_full_attention(attention, x, mask, cfg, buffers)
+    n = size(x, 2)
+    cpu_projection!(buffers.qgate, attention.q, x)
+    qgate = reshape(buffers.qgate, 2cfg.head_dim, cfg.heads, n)
+    cpu_full_rms!(buffers.q, @view(qgate[1:cfg.head_dim, :, :]), attention.q_norm, cfg.eps)
+    cpu_full_rope!(buffers.q, buffers.cosines, buffers.sines)
+    cpu_projection!(buffers.k, attention.k, x)
+    k = reshape(buffers.k, cfg.head_dim, cfg.kv_heads, n)
+    cpu_full_rms!(k, k, attention.k_norm, cfg.eps)
+    cpu_full_rope!(k, buffers.cosines, buffers.sines)
+    cpu_projection!(buffers.v, attention.v, x)
+    v = reshape(buffers.v, cfg.head_dim, cfg.kv_heads, n)
+    for column = 1:n, row = 1:n
+        buffers.mask[row, column] =
+            row <= column && mask[row] == 1 ? 0.0f0 : -floatmax(Float32)
+    end
+    workers =
+        cpu_setting(:parallel_full_heads) && n >= 16 && cpu_projection_blas_threads() == 1 ?
+        min(Threads.nthreads(:default), cfg.heads) : 1
+    if workers == 1
+        cpu_full_workspace_heads!(
+            1:cfg.heads,
+            buffers.q,
             k,
             v,
             qgate,
-            scores_mask,
             cfg,
+            buffers,
+            first(buffers.heads),
         )
+    else
+        settings = cpu_settings()
+        @sync for worker = 1:workers
+            Threads.@spawn with_cpu_settings(settings) do
+                cpu_full_workspace_heads!(
+                    worker:workers:cfg.heads,
+                    buffers.q,
+                    k,
+                    v,
+                    qgate,
+                    cfg,
+                    buffers,
+                    buffers.heads[worker],
+                )
+            end
+        end
     end
-    return out
+    return cpu_projection!(buffers.projected, attention.out, buffers.out)
 end
 
 function cpu_projection!(output, weight, input, beta = 0.0f0)
@@ -177,14 +293,55 @@ function cpu_layer_with_mlp_workspace(
     buffers,
     delta_buffers = nothing,
     projections = nothing,
+    normalization = nothing,
 )
-    normalized = native_rms(x, layer.input_norm, cfg.eps)
+    normalized =
+        normalization === nothing ? native_rms(x, layer.input_norm, cfg.eps) :
+        cpu_rms!(normalization.normalized, x, layer.input_norm, cfg.eps)
     mixed =
         layer.attention.kind == :full ?
-        full_attention(layer.attention, normalized, mask, cfg) :
+        cpu_full_attention(
+            layer.attention,
+            normalized,
+            mask,
+            cfg,
+            normalization === nothing ? nothing : normalization.attention,
+        ) :
         delta_attention(layer.attention, normalized, mask, cfg, delta_buffers, projections)
-    residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
+    residual, normalized = if normalization === nothing
+        native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
+    else
+        # Both matrices belong to this forward. After attention completes,
+        # the pre-attention normalization can be overwritten for the MLP.
+        normalization.residual .= x .+ mixed
+        normalization.residual,
+        cpu_rms!(
+            normalization.normalized,
+            normalization.residual,
+            layer.post_norm,
+            cfg.eps,
+        )
+    end
     return cpu_mlp_add!(residual, layer.mlp, normalized, buffers)
+end
+
+function cpu_rms!(
+    output::Matrix{Float32},
+    input::Matrix{Float32},
+    weight::AbstractVector{Float32},
+    eps,
+)
+    size(output) == size(input) && length(weight) == size(input, 1) ||
+        throw(DimensionMismatch("RMS workspace shapes differ."))
+    Base.mightalias(output, weight) && (weight = copy(weight))
+    width = size(input, 1)
+    for column in axes(input, 2)
+        scale = inv(sqrt(sum(abs2, @view(input[:, column])) / width + eps))
+        @inbounds @simd for row in axes(input, 1)
+            output[row, column] = (input[row, column] * scale) * (1.0f0 + weight[row])
+        end
+    end
+    return output
 end
 
 function cpu_delta_rms!(output::Matrix{Float32}, weight::AbstractVector{Float32}, eps)
@@ -272,9 +429,11 @@ function cpu_delta_projection_workspace(cfg, n)
         masked = zeros(Float32, cfg.hidden, n),
         qkv = zeros(Float32, 2key_width+value_width, n),
         mixed = zeros(Float32, 2key_width+value_width, n),
-        q = zeros(Float32, cfg.key_dim, cfg.key_heads, n),
-        k = zeros(Float32, cfg.key_dim, cfg.key_heads, n),
+        q = zeros(Float32, cfg.key_dim, n, cfg.key_heads),
+        k = zeros(Float32, cfg.key_dim, n, cfg.key_heads),
+        v = zeros(Float32, cfg.value_dim, n, cfg.value_heads),
         z = zeros(Float32, value_width, n),
+        gate = zeros(Float32, cfg.value_dim, n, cfg.value_heads),
         beta = zeros(Float32, cfg.value_heads, n),
         decay = zeros(Float32, cfg.value_heads, n),
         out = zeros(Float32, value_width, n),
@@ -282,38 +441,49 @@ function cpu_delta_projection_workspace(cfg, n)
     )
 end
 
+function cpu_pack_delta_heads!(packed::Array{Float32,3}, input::Matrix{Float32}, offset = 0)
+    width, n, heads = size(packed)
+    size(input, 2) == n && 0 <= offset && offset + width * heads <= size(input, 1) ||
+        throw(DimensionMismatch("Packed Delta head shapes differ."))
+    Base.mightalias(packed, input) && (input = copy(input))
+    # A head's entire sequence is contiguous, unlike a token-major projection.
+    # Chunk GEMMs can read consecutive columns without crossing other heads.
+    for head = 1:heads, token = 1:n
+        start = offset + (head - 1) * width
+        @inbounds @simd for row = 1:width
+            packed[row, token, head] = input[start+row, token]
+        end
+    end
+    return packed
+end
+
 function cpu_delta_prepare(attention, x, mask, cfg, ::Nothing)
     sequence_length = size(x, 2)
     masked = x .* reshape(Float32.(mask), 1, :)
     mixed = cpu_owned_causal_depthwise(native_linear(attention.qkv, masked), attention.conv)
     key_width = cfg.key_dim * cfg.key_heads
-    q = reshape(
-        copy(@view mixed[1:key_width, :]),
-        cfg.key_dim,
-        cfg.key_heads,
-        sequence_length,
+    q = cpu_pack_delta_heads!(
+        Array{Float32}(undef, cfg.key_dim, sequence_length, cfg.key_heads),
+        mixed,
     )
-    k = reshape(
-        copy(@view mixed[(key_width+1):2key_width, :]),
-        cfg.key_dim,
-        cfg.key_heads,
-        sequence_length,
+    k = cpu_pack_delta_heads!(
+        Array{Float32}(undef, cfg.key_dim, sequence_length, cfg.key_heads),
+        mixed,
+        key_width,
     )
-    v = reshape(
-        @view(mixed[(2key_width+1):end, :]),
-        cfg.value_dim,
-        cfg.value_heads,
-        sequence_length,
+    v = cpu_pack_delta_heads!(
+        Array{Float32}(undef, cfg.value_dim, sequence_length, cfg.value_heads),
+        mixed,
+        2key_width,
     )
     # Q/K heads are shared by multiple value heads. Normalize once, not once
     # per value head, and let chunk views reference the normalized storage.
     cpu_normalize_delta_heads!(q, sqrt(Float32(cfg.key_dim)))
     cpu_normalize_delta_heads!(k, 1.0f0)
-    z = reshape(
-        native_linear(attention.z, masked),
-        cfg.value_dim,
-        cfg.value_heads,
-        sequence_length,
+    # Activate the owned projection once, so head loops only multiply the gate.
+    z = cpu_pack_delta_heads!(
+        Array{Float32}(undef, cfg.value_dim, sequence_length, cfg.value_heads),
+        native_cpu_silu!(native_linear(attention.z, masked)),
     )
     beta = native_sigmoid.(native_linear(attention.b, masked))
     decay =
@@ -335,19 +505,26 @@ function cpu_delta_prepare(attention, x, mask, cfg, buffers::NamedTuple)
     native_cpu_silu!(buffers.mixed, buffers.qkv)
     n = size(x, 2)
     width = cfg.key_dim * cfg.key_heads
-    copyto!(reshape(buffers.q, width, n), @view(buffers.mixed[1:width, :]))
-    copyto!(reshape(buffers.k, width, n), @view(buffers.mixed[(width+1):2width, :]))
+    cpu_pack_delta_heads!(buffers.q, buffers.mixed)
+    cpu_pack_delta_heads!(buffers.k, buffers.mixed, width)
+    cpu_pack_delta_heads!(buffers.v, buffers.mixed, 2width)
     cpu_normalize_delta_heads!(buffers.q, sqrt(Float32(cfg.key_dim)))
     cpu_normalize_delta_heads!(buffers.k, 1.0f0)
-    v = reshape(@view(buffers.mixed[(2width+1):end, :]), cfg.value_dim, cfg.value_heads, n)
     cpu_projection!(buffers.z, attention.z, buffers.masked)
-    z = reshape(buffers.z, cfg.value_dim, cfg.value_heads, n)
+    native_cpu_silu!(buffers.z)
+    cpu_pack_delta_heads!(buffers.gate, buffers.z)
     cpu_projection!(buffers.beta, attention.b, buffers.masked)
     buffers.beta .= native_sigmoid.(buffers.beta)
     cpu_projection!(buffers.decay, attention.a, buffers.masked)
     buffers.decay .=
         attention.a_decay .* native_softplus.(buffers.decay .+ attention.dt_bias)
-    return buffers.q, buffers.k, v, z, buffers.beta, buffers.decay, buffers.out
+    return buffers.q,
+    buffers.k,
+    buffers.v,
+    buffers.gate,
+    buffers.beta,
+    buffers.decay,
+    buffers.out
 end
 
 function delta_attention(
@@ -450,9 +627,9 @@ function cpu_delta_heads!(
             span = start:min(start+chunk_size-1, sequence_length)
             n = length(span)
             buffers = n == full_size ? full_buffers : tail_buffers
-            qc = @view q[:, kh, span]
-            kc = @view k[:, kh, span]
-            vc = @view v[:, head, span]
+            qc = @view q[:, span, kh]
+            kc = @view k[:, span, kh]
+            vc = @view v[:, span, head]
             bc = @view beta[head:head, span]
             cumulative = cumsum(@view(decay[head:head, span]); dims = 2)
             pair_decay = buffers.pair
@@ -489,7 +666,7 @@ function cpu_delta_heads!(
                 inplace_rms ? cpu_delta_rms!(result, attention.norm, cfg.eps) :
                 native_rms(result, attention.norm, cfg.eps; centered = false)
             destination = @view out[((head-1)*cfg.value_dim+1):(head*cfg.value_dim), span]
-            destination .= normalized .* native_silu.(@view z[:, head, span])
+            destination .= normalized .* @view(z[:, span, head])
         end
     end
     return nothing
@@ -521,19 +698,19 @@ function cpu_delta_recurrent_heads!(
             fill!(projected, 0.0f0)
             factor = exp(decay[head, token])
             for column = 1:cfg.key_dim
-                key = k[column, kh, token]
+                key = k[column, token, kh]
                 @inbounds @simd for row = 1:cfg.value_dim
                     projected[row] += state[row, column] * key
                 end
             end
             @inbounds @simd for row = 1:cfg.value_dim
                 projected[row] =
-                    beta[head, token] * (v[row, head, token] - factor * projected[row])
+                    beta[head, token] * (v[row, token, head] - factor * projected[row])
             end
             fill!(result, 0.0f0)
             for column = 1:cfg.key_dim
-                key = k[column, kh, token]
-                query = q[column, kh, token]
+                key = k[column, token, kh]
+                query = q[column, token, kh]
                 @inbounds @simd for row = 1:cfg.value_dim
                     updated = factor * state[row, column] + projected[row] * key
                     state[row, column] = updated
@@ -544,8 +721,7 @@ function cpu_delta_recurrent_heads!(
             offset = (head - 1) * cfg.value_dim
             @inbounds for row = 1:cfg.value_dim
                 out[offset+row, token] =
-                    ((result[row] * scale) * attention.norm[row]) *
-                    native_silu(z[row, head, token])
+                    ((result[row] * scale) * attention.norm[row]) * z[row, token, head]
             end
         end
     end
@@ -610,6 +786,16 @@ function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
     workspace = cpu_mlp_workspace(layers, size(hidden, 2))
     delta_buffers = cpu_delta_workspace(cfg, size(hidden, 2))
     projections = cpu_delta_projection_workspace(cfg, size(hidden, 2))
+    normalization =
+        cpu_setting(:mlp_workspace) && cpu_setting(:portable_vector_math) ?
+        (;
+            normalized = similar(hidden),
+            residual = similar(hidden),
+            attention = cpu_full_workspace(
+                cfg,
+                any(layer -> layer.attention.kind == :full, layers) ? size(hidden, 2) : 0,
+            ),
+        ) : nothing
     if workspace === nothing
         if delta_buffers === nothing
             return cpu_hidden_forward(
@@ -621,6 +807,7 @@ function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
                 nothing,
                 nothing,
                 projections,
+                normalization,
             )
         end
         return cpu_hidden_forward(
@@ -632,6 +819,7 @@ function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
             nothing,
             delta_buffers,
             projections,
+            normalization,
         )
     end
     if delta_buffers === nothing
@@ -644,6 +832,7 @@ function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
             workspace,
             nothing,
             projections,
+            normalization,
         )
     end
     return cpu_hidden_forward(
@@ -655,6 +844,7 @@ function cpu_hidden_forward_scoped(hidden, layers, mask, final_norm, cfg)
         workspace,
         delta_buffers,
         projections,
+        normalization,
     )
 end
 
@@ -708,6 +898,7 @@ function cpu_hidden_forward(
     workspace,
     delta_buffers,
     projections = nothing,
+    normalization = nothing,
 )
     if !cpu_setting(:final_token_only)
         # Match a backbone that computes every position through the final MLP
@@ -721,9 +912,13 @@ function cpu_hidden_forward(
                 workspace === nothing ? nothing : workspace.full,
                 delta_buffers,
                 projections,
+                normalization,
             )
         end
-        return native_rms(hidden, final_norm, cfg.eps)[:, end:end]
+        normalized =
+            normalization === nothing ? native_rms(hidden, final_norm, cfg.eps) :
+            cpu_rms!(normalization.normalized, hidden, final_norm, cfg.eps)
+        return normalized[:, end:end]
     end
     for index = 1:(length(layers)-1)
         hidden = cpu_layer_with_mlp_workspace(
@@ -734,18 +929,27 @@ function cpu_hidden_forward(
             workspace === nothing ? nothing : workspace.full,
             delta_buffers,
             projections,
+            normalization,
         )
     end
     # Attention consumes the full context. The final MLP is position-wise,
     # and only the last position contributes to Jeff's trained readout.
     layer = last(layers)
-    normalized = native_rms(hidden, layer.input_norm, cfg.eps)
+    normalized =
+        normalization === nothing ? native_rms(hidden, layer.input_norm, cfg.eps) :
+        cpu_rms!(normalization.normalized, hidden, layer.input_norm, cfg.eps)
     mixed =
         layer.attention.kind == :full ?
         (
             cpu_setting(:final_query) ?
             cpu_final_full_attention(layer.attention, normalized, mask, cfg) :
-            full_attention(layer.attention, normalized, mask, cfg)
+            cpu_full_attention(
+                layer.attention,
+                normalized,
+                mask,
+                cfg,
+                normalization === nothing ? nothing : normalization.attention,
+            )
         ) :
         delta_attention(layer.attention, normalized, mask, cfg, delta_buffers, projections)
     residual = @views hidden[:, end:end] .+ mixed[:, end:end]

@@ -96,6 +96,86 @@ import JSON
         end
     end
 end
+@testset "Blockwise MLP gates preserve exceptional values and ownership" begin
+    JeffClient.with_cpu_settings(
+        :portable_vector_math => true,
+        :vector_math_blocks => true,
+    ) do
+        for n in (255, 256, 257, 513),
+            exception in
+            (0.0f0, -0.0f0, Float32(NaN), Float32(Inf), -100.0f0, nextfloat(0.0f0))
+
+            gate = reshape(0.1f0 .+ sin.(Float32.(1:n)), n, 1)
+            up = reshape(0.2f0 .+ cos.(Float32.(1:n)), n, 1)
+            gate[min(n, 257)] = exception
+            expected = JeffClient.native_silu.(gate) .* up
+            saved_up = copy(up)
+            @test JeffClient.cpu_portable_gate!(gate, up)
+            @test up == saved_up
+            for i in eachindex(gate)
+                @test !isfinite(expected[i]) || iszero(expected[i]) ?
+                      isequal(gate[i], expected[i]) :
+                      isapprox(gate[i], expected[i]; atol = 2e-6, rtol = 2e-6)
+            end
+        end
+        gate = reshape(repeat(Float32[0, -0], 256), 512, 1)
+        up = reshape(repeat(Float32[1, -1, Inf, NaN], 128), 512, 1)
+        expected = JeffClient.native_silu.(gate) .* up
+        @test JeffClient.cpu_portable_gate!(gate, up)
+        @test isequal(gate, expected)
+        @test !JeffClient.cpu_portable_gate!(gate, gate)
+    end
+end
 JeffClient.with_cpu_settings(:portable_vector_math => "1") do
     include(joinpath(@__DIR__, "..", "test", "native.jl"))
+end
+
+@testset "Portable softmax masks, subnormals and nonfinite fallback" begin
+    JeffClient.with_cpu_settings(:portable_vector_math => true) do
+        for n in (1, 7, 64, 257)
+            scores = reshape(sin.(Float32.(1:(3n))), n, 3)
+            scores[:, 2] .= -floatmax(Float32)
+            n > 1 && (scores[2:end, 3] .= -90.0f0)
+            expected = exp.(scores .- maximum(scores; dims = 1))
+            expected ./= sum(expected; dims = 1)
+            actual = copy(scores)
+            @test JeffClient.cpu_portable_softmax!(actual)
+            @test actual ≈ expected atol = 2e-6 rtol = 2e-6
+            @test all(actual[2:end, 3] .> 0.0f0)
+            @test actual[:, 2] == fill(1.0f0 / n, n)
+        end
+        for x in (NaN32, Inf32, -Inf32)
+            scores = Float32[1 x; 2 3]
+            saved = copy(scores)
+            @test !JeffClient.cpu_portable_softmax!(scores)
+            @test isequal(scores, saved)
+        end
+    end
+end
+
+@testset "Parallel activation block boundaries and exceptional lanes" begin
+    JeffClient.with_cpu_settings(
+        :portable_vector_math => true,
+        :vector_math_blocks => true,
+    ) do
+        for n in (65535, 65536, 65537, 1048577)
+            gate = reshape(sin.(Float32.(1:n)), n, 1)
+            gate[1:(n÷2)] .= -0.0f0
+            gate[[257, n-1, n]] .= Float32[NaN, nextfloat(0.0f0), -100]
+            expected = JeffClient.native_silu.(gate)
+            actual = copy(gate)
+            @test JeffClient.cpu_portable_silu!(actual)
+            matches(x, y) =
+                !isfinite(y) || iszero(y) ? isequal(x, y) :
+                isapprox(x, y; atol = 2e-6, rtol = 2e-6)
+            @test all(matches(x, y) for (x, y) in zip(actual, expected))
+            up = reshape(cos.(Float32.(1:n)), n, 1)
+            up[[256, n-2]] .= Float32[Inf, NaN]
+            saved_up = copy(up)
+            expected .*= up
+            @test JeffClient.cpu_portable_gate!(gate, up)
+            @test all(matches(x, y) for (x, y) in zip(gate, expected))
+            @test isequal(up, saved_up)
+        end
+    end
 end

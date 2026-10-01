@@ -41,7 +41,7 @@ function synchronized_logits(backend::ONNXBackend, inputs, device)
     return backend.session(inputs, [backend.output_name])[backend.output_name]
 end
 
-function run_benchmark(args, profile)
+function run_benchmark(args, profile, warmups = 2)
     length(args) in 3:6 || error(
         "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON] [--python-reference]",
     )
@@ -71,7 +71,9 @@ function run_benchmark(args, profile)
         # Warm separately from the cold measurement, then measure exactly one
         # complete forward per evaluation. Model loading and input conversion
         # are excluded; final score transfer and GPU synchronization are included.
-        synchronized_logits(backend, inputs, device)
+        for _ = 2:warmups
+            synchronized_logits(backend, inputs, device)
+        end
         GC.gc(true)
         trial =
             @benchmark synchronized_logits($backend, $inputs, $device) samples=samples evals=1 seconds=120
@@ -79,6 +81,7 @@ function run_benchmark(args, profile)
         sorted_ms = sort(trial.times ./ 1e6)
         result = Dict(
             "comparison_profile" => String(profile),
+            "warmup_forwards" => warmups,
             "backend" => String(device),
             "julia_version" => string(VERSION),
             "machine" => Sys.MACHINE,
@@ -215,7 +218,12 @@ end
 
 function main(args = ARGS)
     profile = "--python-reference" in args ? :python_reference : :default
-    positional = filter(!=("--python-reference"), args)
+    warmup_options = filter(arg -> startswith(arg, "--warmups="), args)
+    length(warmup_options) <= 1 || error("Specify --warmups once.")
+    warmups = isempty(warmup_options) ? 2 : parse(Int, split(only(warmup_options), '=')[2])
+    warmups >= 2 || error("Use at least two warmup forwards.")
+    positional =
+        filter(arg -> arg != "--python-reference" && !startswith(arg, "--warmups="), args)
     length(positional) in 3:6 || error(
         "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON] [--python-reference]",
     )
@@ -230,10 +238,10 @@ function main(args = ARGS)
             :octavian_delta => false,
             :delta_chunk_size => 64,
         ) do
-            run_benchmark(positional, profile)
+            run_benchmark(positional, profile, warmups)
         end
     end
-    return run_benchmark(positional, profile)
+    return run_benchmark(positional, profile, warmups)
 end
 
 main()

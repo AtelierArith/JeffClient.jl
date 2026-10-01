@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jeff Linux CPU Benchmark"
+  short_description: "Compare Python and Julia CPU fairly and document results"
+  default_prompt: "Use $jeff-linux-cpu-benchmark to create or update tools/linux-cpu.sh, run a fair Python CPU versus Julia CPU comparison, and update docs/src/performance.md from the measured results."

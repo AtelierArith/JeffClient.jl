@@ -1,16 +1,22 @@
 include("python_env.jl")
 using PythonCall
 
-length(ARGS) in 4:6 || error(
+warmup_options = filter(arg -> startswith(arg, "--warmups="), ARGS)
+length(warmup_options) <= 1 || error("Specify --warmups once.")
+warmups = isempty(warmup_options) ? 2 : parse(Int, split(only(warmup_options), '=')[2])
+warmups >= 2 || error("Use at least two warmup forwards.")
+benchmark_args = filter(arg -> !startswith(arg, "--warmups="), ARGS)
+length(benchmark_args) in 4:6 || error(
     "Usage: julia --project=tools tools/benchmark_original.jl CHECKPOINT cpu|mps|mps-f32 REFERENCE_JSON SAMPLES [OUTPUT_JSON] [CASE_INDEX]",
 )
 context = pydict(
-    "checkpoint" => abspath(ARGS[1]),
-    "mode" => ARGS[2],
-    "reference_path" => abspath(ARGS[3]),
-    "samples" => parse(Int, ARGS[4]),
-    "output" => length(ARGS) >= 5 ? abspath(ARGS[5]) : nothing,
-    "case_index" => length(ARGS) >= 6 ? parse(Int, ARGS[6]) : 1,
+    "checkpoint" => abspath(benchmark_args[1]),
+    "mode" => benchmark_args[2],
+    "reference_path" => abspath(benchmark_args[3]),
+    "samples" => parse(Int, benchmark_args[4]),
+    "output" => length(benchmark_args) >= 5 ? abspath(benchmark_args[5]) : nothing,
+    "case_index" => length(benchmark_args) >= 6 ? parse(Int, benchmark_args[6]) : 1,
+    "warmups" => warmups,
     "jeff_source" => joinpath(@__DIR__, "..", "extern", "jeff", "src"),
 )
 pyexec(
@@ -73,13 +79,16 @@ with torch.inference_mode():
         raise RuntimeError("Nonfinite original Jeff logits")
     if mode != "mps":
         torch.testing.assert_close(actual[:, :count], expected[:, :count], atol=2e-4, rtol=2e-4)
-    forward()
+    for _ in range(warmups - 1):
+        forward()
     times = []
     for _ in range(samples):
         start = time.perf_counter()
         forward()
         times.append((time.perf_counter() - start) * 1000)
 result = {"backend": "original-python-" + mode, "torch_version": torch.__version__,
+    "warmup_forwards": warmups,
+    "parameter_dtypes": sorted({str(p.dtype) for p in model.parameters()}),
     "case_index": case_index,
     "weight_dtype": str(next(model.parameters()).dtype), "cpu_threads": torch.get_num_threads(),
     "batch_size": int(inputs["input_ids"].shape[0]),

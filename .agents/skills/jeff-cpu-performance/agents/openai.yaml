@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jeff CPU Performance"
+  short_description: "Profile CPU allocation, optimize kernels, and verify speed"
+  default_prompt: "Use $jeff-cpu-performance to investigate native CPU inference bottlenecks, improve the Julia implementation, and verify performance against Python under matched conditions."

@@ -20,7 +20,7 @@ function cpu_defaults(apple::Bool)
         parallel_heads = true,
         mlp_workspace = true,
         trim_padding = true,
-        inplace_delta_rms = false,
+        inplace_delta_rms = portable,
         simd = false,
         octavian_delta = false,
         delta_chunk_size = 64,

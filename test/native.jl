@@ -343,6 +343,88 @@ end
         end
     end
 end
+@testset "CPU full-attention workspace overwrite and mask reuse" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    attention =
+        first(layer.attention for layer in backend.layers if layer.attention.kind == :full)
+    saved_weights = deepcopy(attention)
+    for n in (1, 17, 65), rotary_dim in (0, 2, 4), parallel in (false, true)
+        cfg = merge(backend.config, (; rotary_dim))
+        input = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
+        saved_input = copy(input)
+        buffers = JeffClient.cpu_full_workspace(cfg, n)
+        for mask in (ones(Int64, n), Int64.(isodd.(1:n)))
+            for name in (:qgate, :q, :k, :v, :out, :projected, :mask)
+                fill!(getproperty(buffers, name), NaN32)
+            end
+            for head in buffers.heads
+                fill!(head.scores, NaN32)
+                fill!(head.values, NaN32)
+            end
+            expected = JeffClient.with_cpu_settings(:parallel_full_heads => false) do
+                JeffClient.full_attention(attention, input, mask, cfg)
+            end
+            actual = JeffClient.with_cpu_settings(:parallel_full_heads => parallel) do
+                JeffClient.cpu_full_attention(attention, input, mask, cfg, buffers)
+            end
+            @test actual === buffers.projected
+            @test actual ≈ expected atol = 2e-6 rtol = 2e-6
+            @test input == saved_input
+            @test attention == saved_weights
+            GC.gc(true)
+        end
+    end
+end
+
+@testset "CPU RMS workspace numerical and alias ownership" begin
+    for width in (1, 7, 1024), n in (0, 1, 17)
+        input = reshape(sin.(Float32.(1:(width*n))), width, n)
+        weight = cos.(Float32.(1:width))
+        saved_input, saved_weight = copy(input), copy(weight)
+        expected = JeffClient.native_rms(input, weight, 1.0f-6)
+        output = fill(NaN32, width, n)
+        @test JeffClient.cpu_rms!(output, input, weight, 1.0f-6) === output
+        @test output ≈ expected atol = 2e-6 rtol = 2e-6
+        @test input == saved_input && weight == saved_weight
+        @test JeffClient.cpu_rms!(input, input, weight, 1.0f-6) ≈ expected atol = 2e-6 rtol =
+            2e-6
+    end
+    output = reshape(Float32.(1:12), 4, 3)
+    weight = @view output[:, 1]
+    input = ones(Float32, 4, 3)
+    expected = JeffClient.native_rms(input, copy(weight), 1.0f-6)
+    @test JeffClient.cpu_rms!(output, input, weight, 1.0f-6) ≈ expected
+    saved = copy(output)
+    @test_throws DimensionMismatch JeffClient.cpu_rms!(
+        output,
+        ones(Float32, 4, 2),
+        ones(Float32, 4),
+        1.0f-6,
+    )
+    @test output == saved
+end
+
+@testset "Packed CPU Delta head layout and alias ownership" begin
+    for width in (1, 7, 128), n in (0, 1, 65), heads in (1, 3), offset in (0, 2)
+        input = reshape(Float32.(1:((offset+width*heads)*n)), offset+width*heads, n)
+        saved = copy(input)
+        expected =
+            permutedims(reshape(input[(offset+1):end, :], width, heads, n), (1, 3, 2))
+        packed = fill(NaN32, width, n, heads)
+        @test JeffClient.cpu_pack_delta_heads!(packed, input, offset) === packed
+        @test packed == expected
+        @test input == saved
+    end
+    input = reshape(Float32.(1:12), 4, 3)
+    expected = permutedims(reshape(copy(input), 2, 2, 3), (1, 3, 2))
+    packed = reshape(input, 2, 3, 2)
+    @test JeffClient.cpu_pack_delta_heads!(packed, input) == expected
+    @test_throws DimensionMismatch JeffClient.cpu_pack_delta_heads!(
+        packed,
+        zeros(Float32, 4, 2),
+    )
+    @test_throws DimensionMismatch JeffClient.cpu_pack_delta_heads!(packed, input, -1)
+end
 @testset "CPU projection accumulation and MLP residual ownership" begin
     old_threads = JeffClient.BLAS.get_num_threads()
     try
