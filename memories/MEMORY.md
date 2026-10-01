@@ -824,3 +824,24 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 同model/input/Julia8/OpenBLAS1/currentflags＋両新flagの20回は302.631ms/p95324.113ms/271128624heap bytes/12601allocs、max logit error1.1444e-5（delta-norm-block.json）。直前318.656msより短いが独立repeat/JET/fullsuite検証は進行中。元495.254msの2倍基準247.627msは未達。
 - 独立30回repeatは304.157ms/p95328.888ms/同heapとalloc/maxerror。model retained3.010637944GB、peak RSS5.344727040GB（delta-norm-block-repeat.json）。元495.254ms比約1.628倍、直前318.656msから約4.6%短縮。JET core+portable extension No errors detected、warm286.468ms/271128624bytes/GC5.628ms（profile-delta-norm-block.log）。full test suiteはdelta-norm-block-checkpoint-tests.logでexit0。
 - 最終版は1workerでもactivation126＋block18496＋native437checksがexit0（delta-norm-block-single-worker.log）。JuliaFormatter整形済み。実測改善をcheckpointとしてcommit/pushしgoalはactive維持。次は大きな費用を占める投影の融合/worker分割とメモリtrafficを検討する。
+
+## Projection worker and fusion follow-up
+
+- 前turnはnorm/block実装、全test/JET/Profile/独立repeat/commit-pushでprogress。現在4dd4a40からworker数と融合を実測した。各試験は参照guard通過、既存最速の設定は変更していない。
+- 16Julia threads/OpenBLAS1のGEMM microでraw gate 8/12/16 workers=1.332/1.651/1.345ms、down1.368/1.572/1.237ms、qkv2.889/2.881/2.927ms（projection-workers-16-micro.log）。特に12/16への増加を一般的高速化とは扱わない。
+- 全forwardはDelta workerを8に固定し、Julia12/16（projectionは12/16、full attentionはcfg.headsまで）各20回を比較。12workers328.823ms/p95348.922ms/271414832bytes/15770allocs、16workers305.098ms/p95323.004ms/271654832bytes/18770allocs。既存8workers304.157ms/12601allocsに対して改善なし（projection-workers{12,16}.json）。worker設定は8を維持する。
+- tools/compare_cpu_projection_fusion.jlで同じ入力を共有するgate/upまたはqkv/zをロード後hcatして1回投影するmicroを追加。combined結果を別々のMatrixへ戻すcopy込みは101tokens gate/up2.867→3.422ms、qkv/z3.893→4.418msと遅いためproductionへ導入しない。
+- copyなしの直接combined outputは101tokens gate/up2.867→2.825ms、qkv/z3.893→3.647ms、256tokens5.650→5.592ms/7.995→7.680ms。次の候補だが新しいview/ownership/loader契約とwhole-forwardの確認が必要。task heap7424→3456bytesだけで全forward高速化を主張しない。microはwarm/synthetic sin input、実モデル全層cache条件と同じとは限らない（projection-fusion-direct-micro.log）。
+- BLISBLASの公式実装とblis_jll配布定義を確認した。macOS/Linux（x86_64/aarch64）の配布あり、LBTのBLAS forwardingで使用可能。MKLではない。https://github.com/JuliaLinearAlgebra/BLISBLAS.jl および https://github.com/JuliaBinaryWrappers/blis_jll.jl/blob/main/Artifacts.toml 。まず隔離temp Julia環境へ導入して比較し、root/toolsの依存はまだ変更しない。
+- 隔離環境は/private/tmp/jeff-blis-htwsuz（BLISBLAS0.2.0、blis/blis32_jll2.0.0+2、LAPACK3.12.1、LLVMOpenMP23.1.1）。最初のJulia mktempdir既定cleanup環境はプロセス終了時に自動削除されたため、再利用用はcleanup=falseで作った。共有depotのpackage/artifactは削除しない。BLIS/LBT getter両方1threadsとloaded libraryのblisを確認し、プロセス開始時のみforwardingを変更した。
+- BLIS single/Julia8のraw gate/down/qkv microは2.294/1.222/4.739ms、同OpenBLAS1は1.332/1.368/2.889ms。downだけ有利だが全体switchには根拠不足。full forward10-call screenは375.005ms（p95415.116ms、10samplesのtailはscreen statistic）、同heap271128624bytes/12601alloc（blis-full-screen.json）、保存済み独立logit guard通過。既存OpenBLAS304.157msから改善なし、依存・デフォルト変更はしない。
+- 今回はworker増加、copy込み融合、BLIS全体切替を不採用とする測定結果が得られた。production実装の速度改善はまだないため、その改善を主張するcommit/pushは行わない。診断toolとjournal変更は次checkpointへ引き継ぐ。2倍目標はactiveを維持し、次はforward内の投影workspace/配列生成と、copyなしfusionの契約を検討する。
+
+## Delta projection workspace checkpoint
+
+- JEFF_CPU_DELTA_PROJECTION_WORKSPACE=1でmasked/QKV/convolution/Q/K/Z/beta/decay/head output/out projectionをforward-localに確保し、18 Delta層で再利用する。既定off、実入力101tokensの配列payload9,114,240bytes。convolutionは必ずfill!(mixed,0)後、projectionは上書き。backendに共有cacheを置かず、同時forwardと以前返したscoresの所有を維持する。
+- 同real0.8B/Float32/parcel B1/padded256/active101、Julia8/OpenBLAS1、portable vector/block/norm/recurrent/head/full-head/MLP/trim/final-query/projection-scope有効。20samples median290.285ms/p95312.535ms、独立30samples296.796ms/p95321.881ms、113,553,680heap bytes/11,895allocations、maxerror1.1444e-5。直前304.157ms/271,128,624bytesからrepeat中央値約2.4%短縮、heap約58.1%削減。固定基準495.254ms比約1.669倍、247.627ms目標は未達。
+- activation126＋block18496＋native597checksが8worker/1worker両方exit0、160checks追加（n1/9/65/129、mask再訪、NaNでscratchを汚して上書き確認、recurrent/parallel組合せ、GC、入力保持）。全test suite exit0、core+portable extension JET No errors detected、Profile/Allocs5%取得。warm299.665ms、同heap、GC0。ログdelta-projection-buffer-{validation,single-worker,checkpoint-tests}.log、profile-delta-projection-buffers.log、delta-projection-buffers{,-repeat}.json。
+- 最新Allocsではnative_residual_rms/native_rms/native_rope/native_linearが残る。heap0は目標にしない。既存logitsのfresh score、forward-local workspace、spawn taskには割当が必要。caller-owned logits!/永続scratch/worker方式変更は別の所有契約と検証を要する。
+- tools/compare_cpu_projection_kernels.jlは同8worker行分割でOpenBLAS/Octavian serial/直接turboを比較。101tokens gate1.260/1.854/4.136ms、down1.231/1.859/3.873、qkv2.873/3.836/13.215。参照guard通過、Matrix materializationでも逆転なし。不採用。150個の大きなweightのexact zero fractionは全て0で、ゼロ行/列pruningの根拠なし（weight-zero-structure.jsonl）。
+- phase toolはprojection workspaceを実際に渡す。手書きDelta stage toolはworkspace path未対応のためflag1を明示的に拒否し、誤った比較を避ける。次候補はRMS/残差融合、MLP down出力再利用、copyなしQKV/Z融合。時間改善は必ず全forwardで再確認する。

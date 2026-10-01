@@ -119,6 +119,9 @@ function pass(backend, ids, mask)
 end
 
 function main()
+    get(ENV, "JEFF_CPU_DELTA_PROJECTION_WORKSPACE", "0") == "1" && error(
+        "This stage diagnostic requires projection workspace disabled; use time_cpu_phases.jl to profile the workspace path.",
+    )
     length(ARGS) == 2 || error("Usage: time_cpu_delta_stages.jl MODEL REFERENCE")
     for flag in (
         "JEFF_CPU_PORTABLE_VECTOR_MATH",

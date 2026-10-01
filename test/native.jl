@@ -262,3 +262,43 @@ end
         @test isequal(actual, expected)
     end
 end
+
+@testset "CPU Delta projection buffers overwrite and mask reuse" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    cfg = backend.config
+    attention = first(l.attention for l in backend.layers if l.attention.kind == :delta)
+    for n in (1, 9, 65, 129), recurrent in ("0", "1"), parallel in ("0", "1")
+        x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
+        saved = copy(x)
+        withenv(
+            "JEFF_CPU_DELTA_PROJECTION_WORKSPACE"=>"1",
+            "JEFF_CPU_RECURRENT_DELTA"=>recurrent,
+            "JEFF_CPU_PARALLEL_HEADS"=>parallel,
+        ) do
+            buffers = JeffClient.cpu_delta_projection_workspace(cfg, n)
+            state = JeffClient.cpu_delta_workspace(cfg, n)
+            for holes in (false, true, false)
+                mask = ones(Int64, n)
+                holes && n > 1 && (mask[1:3:(n-1)] .= 0)
+                expected =
+                    JeffClient.delta_attention(attention, x, mask, cfg, state, nothing)
+                for array in values(buffers)
+                    fill!(array, Float32(NaN))
+                end
+                GC.gc(true)
+                actual = JeffClient.delta_attention(attention, x, mask, cfg, state, buffers)
+                @test actual === buffers.projected
+                @test actual ≈ expected atol=2e-5 rtol=2e-5
+                @test x == saved
+            end
+            @test_throws DimensionMismatch JeffClient.delta_attention(
+                attention,
+                x[:, 1:0],
+                Int64[],
+                cfg,
+                state,
+                buffers,
+            )
+        end
+    end
+end

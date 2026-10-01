@@ -609,3 +609,28 @@ No type-instability fix is claimed. Weight materialization, transposed MLP
 layout and combined gate/up packing were measured and rejected because they
 did not demonstrate a speed improvement. Parallel scratch reuse across layers
 remains a candidate for reducing the increased allocation.
+
+### Portable CPU Delta projection workspace (Intel)
+
+`JEFF_CPU_DELTA_PROJECTION_WORKSPACE=1` reuses DeltaNet projection and
+preparation buffers across layers within a forward. It is disabled by default.
+The buffers are not shared between forwards; convolution scratch is cleared
+before accumulation and projection outputs are overwritten.
+
+On Intel i9-9900K, Julia 1.13.1, Float32, Julia eight workers and OpenBLAS one
+thread, the real 0.8B parcel input (batch one, padded 256, active 101) measured
+290.285 ms over 20 warmed forwards and 296.796 ms over an independent 30-forward
+repeat. This used the portable vector/block, Delta normalization/recurrent,
+parallel projection/head/full-head, projection-scope, MLP/Delta workspace,
+padding-trim and final-query options. No MKL or Accelerate was used.
+The preceding configuration measured 304.157 ms. Heap allocation decreased
+from 271,128,624 to 113,553,680 bytes per forward, with 11,895 allocations.
+The projection workspace itself contains 9,114,240 bytes of array payload on
+this input; this is distinct from cumulative heap allocation or process RSS.
+
+Maximum absolute error against the saved independent PyTorch reference was
+1.1444e-5. Shape/mask reuse, scratch overwrite, GC, concurrent-forward and
+input/returned-score ownership checks passed, as did the full test suite and
+JET checks. These results do not establish zero allocation or dataset accuracy.
+Against the fixed 495.254 ms pre-optimization Intel baseline, the repeat is
+about 1.67 times faster; the two-times target remains unmet.

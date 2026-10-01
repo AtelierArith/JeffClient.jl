@@ -28,6 +28,7 @@ function main()
     for (name, original) in (
             ("gate", first(backend.layers).mlp.gate),
             ("down", first(backend.layers).mlp.down),
+            ("qkv", first(backend.layers).attention.qkv),
         ),
         packed in (false, true)
 
@@ -35,7 +36,8 @@ function main()
         input = reshape(sin.(Float32.(1:(size(weight, 1)*101))), size(weight, 1), 101)
         output = zeros(Float32, size(weight, 2), 101)
         expected = transpose(weight) * input
-        for workers in (1, 2, 4, 8)
+        for workers in (1, 2, 4, 8, 12, 16)
+            workers > Threads.nthreads(:default) && continue
             operation =
                 workers == 1 ? () -> mul!(output, transpose(weight), input) :
                 () -> parallel_product!(output, weight, input, workers)

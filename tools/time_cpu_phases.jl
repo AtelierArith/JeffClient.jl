@@ -8,14 +8,30 @@ if get(ENV, "JEFF_CPU_PORTABLE_VECTOR_MATH", "0") == "1"
     @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 end
 
-function phase_layer(layer, hidden, mask, cfg, mlp_buffers, delta_buffers, final)
+function phase_layer(
+    layer,
+    hidden,
+    mask,
+    cfg,
+    mlp_buffers,
+    delta_buffers,
+    final,
+    projections = nothing,
+)
     pre = @timed JeffClient.native_rms(hidden, layer.input_norm, cfg.eps)
     attention = @timed if layer.attention.kind == :full
         final ?
         JeffClient.cpu_final_full_attention(layer.attention, pre.value, mask, cfg) :
         JeffClient.full_attention(layer.attention, pre.value, mask, cfg)
     else
-        JeffClient.delta_attention(layer.attention, pre.value, mask, cfg, delta_buffers)
+        JeffClient.delta_attention(
+            layer.attention,
+            pre.value,
+            mask,
+            cfg,
+            delta_buffers,
+            projections,
+        )
     end
     post = @timed if final
         residual = @views hidden[:, end:end] .+ attention.value[:, end:end]
@@ -47,11 +63,13 @@ function phase_pass_unscoped(backend, ids, mask)
     hidden = JeffClient.native_gather(backend.embedding, ids)
     workspace = JeffClient.cpu_mlp_workspace(backend.layers, length(ids))
     delta = JeffClient.cpu_delta_workspace(cfg, length(ids))
+    projections = JeffClient.cpu_delta_projection_workspace(cfg, length(ids))
     records = []
     for (i, layer) in enumerate(backend.layers)
         final = i == length(backend.layers)
         buffers = final ? workspace.final : workspace.full
-        hidden, times, bytes = phase_layer(layer, hidden, mask, cfg, buffers, delta, final)
+        hidden, times, bytes =
+            phase_layer(layer, hidden, mask, cfg, buffers, delta, final, projections)
         push!(
             records,
             (layer = i, kind = layer.attention.kind, ms = times .* 1000, bytes = bytes),
