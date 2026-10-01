@@ -210,7 +210,6 @@ function JeffClient.native_forward_scope(f, reference::Metal.MtlArray)
         Metal.synchronize()
         rethrow()
     finally
-        clear_mps_command_cache!()
         workspace.active = false
         for slot = (workspace.cursor+1):length(workspace.slots)
             workspace.bytes -= (workspace.slots[slot]::Metal.MtlArray).maxsize
@@ -276,7 +275,7 @@ function JeffClient.native_forward_scope(
     finally
         # A complete readback or the inner exception handler precedes eviction.
         while length(bank.order) > 1 &&
-              sum(entry.bytes for entry in values(bank.entries)) > bank.byte_limit
+            sum(entry.bytes for entry in values(bank.entries)) > bank.byte_limit
             evict_shape_workspace!(bank)
         end
     end
@@ -419,7 +418,6 @@ end
 
 function JeffClient.native_host(input::Metal.MtlArray)
     host = Array(input) # This waits for the current queue's GPU work.
-    clear_mps_command_cache!()
     recycle_uploads!()
     trim_completed_buffer_pool!()
     return host

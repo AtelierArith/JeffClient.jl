@@ -1,5 +1,29 @@
 # パフォーマンスの知見
 
+## 2026-10-01: M2 Max の MPSCommandBuffer 再利用を修正
+
+- `ext/JeffClientMetalExt.jl` のtask-local MPS wrapper cacheを削除し、Layaと同様にencodeごとに `MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(queue))` を作る。Metalのcommand batchingと、GPU完了まで配列/tensor-data/commandを `record_operation!` で保持する処理は維持。不要なreadback/例外cleanupのcache clearと古いcache identity検証も削除。
+- `tools/verify_metal_command_buffers.jl` は実際の `native_matmul` とbroadcastを16回queueへ投入し、系列長256→9→256、処理未完了時GC、完了後GC、入力/weight保持、異なる値の過去出力保持を検証。修正前同assertion/exit134、修正後exit0。既存primitive verifierからも呼ぶ。古いCPU padding-disabled前提はtask-local `with_cpu_settings(:trim_padding=>false)` で明示するよう修正。
+- `Pkg.test()`、全 `verify_metal_primitives.jl`、独立PyTorch参照15cases×2passesのfull-sequence adapter実モデル照合がexit0。padding/length1–512/interior mask/batch1–3/GCを含み、max logit error3.445754e-5。Metal scalar indexingは無効。変更したmatmul helperの `@code_warntype` はMtlMatrix{Float32,PrivateStorage}、JETはNo errors detected。preallocated64×64/64×9のsubmission＋同期でJulia heap1072bytes（GPU buffer割当数とは別）。JuliaFormatter適用、読み取り専用reviewの重大指摘なし。
+- 標準 `tools/mac-M-series.sh --checkpoint <pinned Scratch path>` が既定30samples×2processでexit0、summary guard通過。Apple M2 Max/12cores/96GiB/macOS26.5.2/Julia1.13.1/Metal1.11.1/PyTorch2.14.0、F32、parcelB1/L256/active101、全256token/readout/CPU score返却/GPU upload＋完了込み。ロード/compile/tokenization除外、AC接続、host非隔離/affinityなし。
+- CPU1thread PyTorch medians568.902/567.711ms、Julia/Accelerate1 medians638.369/639.512ms。GPU MPSF32 medians264.487/264.122ms、Metalfull-sequence93.738/93.761ms（p9594.267/101.296ms）。修正前Metalはabortしたため、cache削除の速度差は測定できない。旧M4結果と直接比較しない。
+- Metal warm Julia heap373,520/466,496bytes、8,692/11,821allocations。GPU buffer割当回数の計測ではない。両processのpool保持はGC後26,626,867,200bytes/trim後20,870,184,960bytesで、warm Julia heap・model保持量とは区別する。
+- benchmark JSON/log/runtime/hashes/summaryはignored `artifacts/benchmarks/mac-M-series-20261001T080357Z/`。regression before/after、primitives、Pkg.test、独立参照JSON/生成log/実モデル照合、型/heap診断、source.patch/hashes/新規source snapshotsはignored `artifacts/metal-fix/`。計測sourceはbase2268210に未commitの本修正を適用したもの。旧MWEは意図的に不正な再利用を再現するコードとして保存している。
+
+## 2026-10-01: Apple M2 Max / mac-M-series.sh 実行失敗
+
+- ユーザー依頼で標準driverを実行。source `2268210df81cc5afccfc805b2eef5a68ea912dde`、開始時tracked worktree clean。Apple M2 Max / 12 cores / 96 GiB / Darwin25.5.0 / Julia1.13.1、AC接続。古いGeneral registryを更新して依存解決し、`uv sync --project extern/jeff --no-default-groups` と pinned checkpoint取得を実施。
+- `./tools/mac-M-series.sh --checkpoint /Users/atelierarith/.julia/scratchspaces/99eee0ee-b0c7-48fb-9455-442e76ba5e88/hub/models--mstrasser--Jeff-Qwen3.5-0.8B/snapshots/0f212b3e72acb4dde3f7da61e925d6ab7f819990`。既定30samples×2process、全256token/F32/readout/CPU score返却、GPU upload込み。
+- run1のみCPU PyTorch median574.453ms/p95586.953ms、CPU Julia median638.918ms/p95689.267ms、MPS median264.052ms/p95264.463msのJSONを生成。Metal run1が `_status < MTLCommandBufferStatusCommitted` / `-[IOGPUMetalCommandBuffer setCurrentCommandEncoder:]` line323 のnative assertionでsignal6、driver exit1。同じMetal commandの単独再実行も同assertion/exit134。原因は未特定。2回目は未実施、summary未生成のため比較全体の有効な結果として採用しない。
+- partial JSON/runtime/hash/hardware/元の失敗logと `gpu-metal-retry.log` はignored `artifacts/benchmarks/mac-M-series-20261001T074311Z/`。準備logは `artifacts/benchmarks/mac-device-setup/`。hostは非隔離で別LanguageServer processのCPU使用も観測。推論sourceは変更していない。
+
+### MPSCommandBuffer 再利用の MWE
+
+- `tools/mwe_metal_mps_command_buffer.jl` はMetalのみimportし、4096×4096と4096×256のFloat32行列積MPSGraphと `c .+= 1f0` を交互に16回投入する。JeffClient/Python/実モデル不要。JuliaFormatter適用済み。
+- macOSの製品versionは `sw_vers` で26.5.2/build25F84（Darwin25.5.0）。Metal1.11.1 / Julia1.13.1 / M2 Max。`julia --startup-file=no --project=tools tools/mwe_metal_mps_command_buffer.jl` は6回目のencode後に元queue bufferがCommitted、MPS wrapperの現在bufferはNotEnqueuedになり、次のcompute encoder作成が同assertionでexit134。小行列64×64/100回のprobeは通過。
+- 同じMWEへ `--fresh` を付け、encodeごとにMPS wrapperを新規生成すると16回と全要素4097の数値assertが通過/exit0。元wrapperの再利用時、MPSGraphが内部commit/continueしてqueueの元bufferと乖離する挙動が直接観測された。JeffClientの `batched_mps_command_buffer` はowner identityだけでwrapperを再利用しており、この連携が再現条件。Metal.jl単独の公開演算の不具合を立証したものではない。本体の修正はまだしていない。
+- 最終MWEの再現log `artifacts/metal-mwe/reproduce.log`、対照log `artifacts/metal-mwe/control-fresh.log`。縮小probe/formatterログも同ignored directory。内部API（ensure_cmdbuf!/end_encoder!/record_operation!/maybe_autoflush!）はMetal1.11.1の `src/command_batching.jl`、MPS wrapperは `lib/mps/command_buf.jl`、graph encodeは `lib/mpsgraphs/execution.jl` を参照。
+
 ## 2026-10-01: Apple M4 の旧計測を破棄
 
 ユーザーの指示により、旧 Apple M4 の CPU/Metal/MLX ベンチマークはすべて無効。旧速度比・割当比較を根拠に使わない。docs/src の旧表と M4 JSON、README/PLAN の旧速度記述を削除。実装・所有権・数値検証の知見は性能値とは区別する。新しい比較は1thread/全256token/F32を基準にし、8thread対Accelerate自動10threadとGPU結果は別記する。

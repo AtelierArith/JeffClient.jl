@@ -2,6 +2,8 @@ using JeffClient
 using LinearAlgebra
 import Metal
 
+include("verify_metal_command_buffers.jl")
+
 function kernel_handle_probe!(output)
     index = Int32(Metal.thread_position_in_grid_1d())
     if index <= length(output)
@@ -51,7 +53,7 @@ function verify_batched_forward_workspace(extension)
             !workspace.active || error("Batch workspace remained active after readback.")
             if previous_slots !== nothing
                 length(previous_slots) == length(workspace.slots) &&
-                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                    all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
                     error("Batch mask values replaced workspace slots.")
                 all(
                     get(workspace.tensor_data, key, nothing) === value for
@@ -373,7 +375,7 @@ function verify_fused_delta_mask_workspace(extension)
             workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
             if previous_slots !== nothing
                 length(previous_slots) == length(workspace.slots) &&
-                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                    all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
                     error("Mask values changed fused workspace slot identities.")
             end
             previous_slots = copy(workspace.slots)
@@ -433,8 +435,10 @@ function main()
         for (row, start) in enumerate((3, 1, 5, 1))
             JeffClient.native_sequence_start(reference, masks, row) == start ||
                 error("Leading padding start mismatch.")
-            JeffClient.native_sequence_start(zeros(Float32, 1, 1), masks, row) == 1 ||
-                error("CPU unexpectedly trims padding.")
+            cpu_start = JeffClient.with_cpu_settings(:trim_padding => false) do
+                JeffClient.native_sequence_start(zeros(Float32, 1, 1), masks, row)
+            end
+            cpu_start == 1 || error("Metal trimming flag changed the CPU policy.")
         end
         ENV["JEFF_METAL_TRIM_PADDING"] = "0"
         all(
@@ -481,27 +485,8 @@ function main()
         all(==(value), Array(probe)) || error("Stateful kernel fallback lost its capture.")
     end
     println("Validated kernel handle reuse, GC, and method-update invalidation.")
-    Metal.synchronize()
-    extension.clear_mps_command_cache!()
+    verify_metal_command_buffers()
     queue = Metal.global_queue(Metal.device())
-    owner = Metal.ensure_cmdbuf!(queue)
-    command = extension.batched_mps_command_buffer(queue)
-    extension.batched_mps_command_buffer(queue) === command ||
-        error("MPS command wrapper was not reused.")
-    pointer(command.commandBuffer) == pointer(owner) || error("MPS command owner mismatch.")
-    GC.gc(true)
-    extension.batched_mps_command_buffer(queue) === command ||
-        error("MPS command wrapper lost after GC.")
-    Metal.flush!(queue)
-    next_command = extension.batched_mps_command_buffer(queue)
-    next_command !== command || error("MPS command wrapper reused after submission.")
-    pointer(next_command.commandBuffer) != pointer(owner) ||
-        error("Submitted command buffer reused.")
-    JeffClient.native_host(Metal.MtlArray(Float32[1]))
-    cache = task_local_storage()[extension.MPS_COMMAND_CACHE_KEY]
-    cache.owner === nothing && cache.command === nothing ||
-        error("Completed MPS command retained.")
-    println("Validated MPS command wrapper identity, submission boundaries, GC, and clear.")
     for width in (7, 128, 1024), sequence_length in (1, 9, 65)
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mixed = cos.(host)
@@ -729,9 +714,6 @@ function main()
         failed && !workspace.active || error("Workspace exception cleanup failed.")
         length(workspace.slot_indices) == 1 ||
             error("Failed forward retains stale slot index.")
-        cache = task_local_storage()[extension.MPS_COMMAND_CACHE_KEY]
-        cache.owner === nothing && cache.command === nothing ||
-            error("Failed forward retains MPS command.")
         extension.clear_forward_workspace!()
         isempty(workspace.slots) && isempty(workspace.tensor_data) ||
             error("Workspace retains slots after clear.")
@@ -791,7 +773,7 @@ function main()
             end
         catch exception
             exception isa ErrorException &&
-            exception.msg == "packed workspace failure probe" || rethrow()
+                exception.msg == "packed workspace failure probe" || rethrow()
         end
         !workspace.active || error("Packed workspace stays active after exception.")
         for (key, values) in workspace.feed_values
@@ -800,9 +782,9 @@ function main()
         end
         extension.clear_forward_workspace!()
         isempty(workspace.slots) &&
-        isempty(workspace.tensor_data) &&
-        isempty(workspace.slot_indices) &&
-        isempty(workspace.feed_values) ||
+            isempty(workspace.tensor_data) &&
+            isempty(workspace.slot_indices) &&
+            isempty(workspace.feed_values) ||
             error("Packed workspace retains objects after clear.")
         ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
         previous_shape_arrays = Dict{Int,Any}()
@@ -862,7 +844,7 @@ function main()
             end
         catch exception
             exception isa ErrorException &&
-            exception.msg == "shape workspace failure probe" || rethrow()
+                exception.msg == "shape workspace failure probe" || rethrow()
         end
         for entry in values(bank.entries)
             !entry.active || error("Shape workspace active after failure.")
@@ -900,7 +882,7 @@ function main()
         embedding = Metal.MtlArray(host)
         for ids in (Int64[], Int64[0], Int64[10, 0, 5, 5, 10])
             actual = Array(JeffClient.native_gather(embedding, ids))
-            actual == host[:, ids .+ 1] || error("Embedding gather mismatch.")
+            actual == host[:, ids.+1] || error("Embedding gather mismatch.")
         end
         for ids in (Int64[-1], Int64[11], Int64[0, typemax(Int64)])
             caught = try
@@ -1158,7 +1140,7 @@ function main()
         )
         gpu_q, gpu_k, gpu_beta, gpu_decay = Metal.MtlArray.((q, k, beta, decay))
         output = extension.pooled_array(Float32, (value_width, value_heads, length))
-        Metal.@metal threads=(32, 8) groups=(cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
+        Metal.@metal threads = (32, 8) groups = (cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
             output,
             gpu_q,
             gpu_k,
@@ -1192,7 +1174,7 @@ function main()
         isapprox(Array(output), expected; atol = 2.0f-5, rtol = 2.0f-4) ||
             error("Packed V recurrent mismatch.")
         gpu_factor = exp.(gpu_decay)
-        Metal.@metal threads=(32, 8) groups=(cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
+        Metal.@metal threads = (32, 8) groups = (cld(value_width, 8), value_heads) extension.delta_recurrent_kernel!(
             output,
             gpu_q,
             gpu_k,
