@@ -24,3 +24,113 @@
         Dict("input_ids" => fill(Int64(64), 1, 2), "attention_mask" => ones(Int64, 1, 2)),
     )
 end
+
+@testset "CPU forward-local scratch ownership" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    samples = JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
+    matrix(rows) = reduce(vcat, [permutedims(Int64.(row)) for row in rows])
+    for parallel in ("0", "1"), mlp in ("0", "1")
+        withenv(
+            "JEFF_CPU_DELTA_WORKSPACE" => "1",
+            "JEFF_CPU_PARALLEL_HEADS" => parallel,
+            "JEFF_CPU_MLP_WORKSPACE" => mlp,
+        ) do
+            for sample in samples
+                inputs = Dict(name => matrix(rows) for (name, rows) in sample["inputs"])
+                saved = deepcopy(inputs)
+                expected =
+                    reduce(vcat, [permutedims(Float32.(row)) for row in sample["logits"]])
+                first_result = logits(backend, inputs)
+                retained = copy(first_result)
+                GC.gc(true)
+                tasks = [Threads.@spawn(logits(backend, inputs)) for _ = 1:2]
+                for task in tasks
+                    @test fetch(task) ≈ expected atol=2e-5 rtol=2e-5
+                end
+                @test first_result ≈ expected atol=2e-5 rtol=2e-5
+                @test first_result == retained
+                @test inputs == saved
+            end
+        end
+    end
+end
+
+@testset "CPU final query preserves full-context attention" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    layer = last(backend.layers)
+    cfg = backend.config
+    for n in (1, 9, 65), holes in (false, true)
+        x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
+        mask = ones(Int64, n)
+        holes && n > 1 && (mask[1:2:(n-1)] .= 0)
+        expected = JeffClient.full_attention(layer.attention, x, mask, cfg)[:, end:end]
+        actual = JeffClient.cpu_final_full_attention(layer.attention, x, mask, cfg)
+        @test actual ≈ expected atol=2e-5 rtol=2e-5
+    end
+    withenv("JEFF_CPU_FINAL_QUERY" => "1") do
+        for sample in
+            JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
+            inputs = Dict(
+                name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for
+                (name, rows) in sample["inputs"]
+            )
+            expected =
+                reduce(vcat, [permutedims(Float32.(row)) for row in sample["logits"]])
+            @test logits(backend, inputs) ≈ expected atol=2e-5 rtol=2e-5
+        end
+    end
+end
+
+@testset "CPU Delta chunk and worker tuning" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    samples = JSON.parsefile(joinpath(@__DIR__, "fixtures", "native", "reference.json"))
+    for chunk in (1, 3, 16, 32, 64, 128), workers in (1, 2, 4, 8)
+        withenv(
+            "JEFF_CPU_DELTA_CHUNK_SIZE" => string(chunk),
+            "JEFF_CPU_DELTA_WORKERS" => string(workers),
+            "JEFF_CPU_DELTA_WORKSPACE" => "1",
+            "JEFF_CPU_PARALLEL_HEADS" => "1",
+        ) do
+            for sample in samples
+                inputs = Dict(
+                    name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for
+                    (name, rows) in sample["inputs"]
+                )
+                expected =
+                    reduce(vcat, [permutedims(Float32.(row)) for row in sample["logits"]])
+                @test logits(backend, inputs) ≈ expected atol=2e-5 rtol=2e-5
+            end
+        end
+    end
+    withenv("JEFF_CPU_DELTA_CHUNK_SIZE" => "0") do
+        @test_throws ArgumentError JeffClient.cpu_delta_worker_workspace(backend.config, 9)
+    end
+    withenv("JEFF_CPU_DELTA_WORKERS" => "0") do
+        @test_throws ArgumentError JeffClient.cpu_delta_workers(backend.config)
+    end
+end
+
+@testset "CPU recurrent Delta versus chunked reference" begin
+    backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+    attention =
+        first(layer.attention for layer in backend.layers if layer.attention.kind == :delta)
+    cfg = backend.config
+    for n in (1, 9, 65, 129, 256), holes in (false, true)
+        x = reshape(sin.(Float32.(1:(cfg.hidden*n))), cfg.hidden, n)
+        mask = ones(Int64, n)
+        holes && n > 1 && (mask[1:3:(n-1)] .= 0)
+        expected = withenv("JEFF_CPU_RECURRENT_DELTA" => "0") do
+            JeffClient.delta_attention(attention, x, mask, cfg)
+        end
+        for parallel in ("0", "1")
+            actual = withenv(
+                "JEFF_CPU_RECURRENT_DELTA" => "1",
+                "JEFF_CPU_PARALLEL_HEADS" => parallel,
+            ) do
+                scratch = JeffClient.cpu_delta_workspace(cfg, n)
+                JeffClient.delta_attention(attention, x, mask, cfg, scratch)
+            end
+            @test actual ≈ expected atol=2e-5 rtol=2e-5
+        end
+    end
+end

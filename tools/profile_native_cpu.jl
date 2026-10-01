@@ -4,6 +4,9 @@ using InteractiveUtils
 using Profile
 import JSON
 import JET
+if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
+    import Octavian
+end
 
 if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
     Sys.isapple() || error("Apple Accelerate requires macOS.")
@@ -33,6 +36,8 @@ function main()
     if JET.JET_AVAILABLE
         extension = Base.get_extension(JeffClient, :JeffClientAppleAccelerateExt)
         modules = extension === nothing ? (JeffClient,) : (JeffClient, extension)
+        octavian = Base.get_extension(JeffClient, :JeffClientOctavianExt)
+        octavian === nothing || (modules = (modules..., octavian))
         show(
             stdout,
             MIME"text/plain"(),

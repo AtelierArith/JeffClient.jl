@@ -1,5 +1,65 @@
 # パフォーマンスの知見
 
+## 2026-10-01: Issue 4/5/6 CPU 2倍高速化の新ベースライン
+
+- 現在の実機は Intel Core i9-9900K / x86_64 macOS / Julia 1.13.1。過去の Apple M4 の時間をこの作業のベースラインとして流用しない。
+- pinned Jeff 0.8B revision `0f212b3e72acb4dde3f7da61e925d6ab7f819990` を取得。parcel B1/L256/active101、Float32、readout込み、ロード/コンパイル/tokenization除外。
+- 現行高速設定: Julia 8 workers、BLAS 8、AppleAccelerate 0.7.0（8 threads報告）、parallel heads / MLP workspace / vector math / leading padding trim 有効、in-place Delta RMS 無効。
+- 20回ウォーム測定: median 495.254279 ms / min 482.833361 / p95 511.029933 / max 521.144273、392,752,624 heap bytes / 22,671 allocations。独立参照最大 logit 誤差 9.536743e-6。生データ `artifacts/cpu-tuning/baseline-fast.json`。
+- 2倍の達成基準は同条件で median <=247.6271395 ms。短いfixtureや古い標準設定との比較で達成扱いにしない。Profile/JET/Profile.Allocs の実行ログは `/private/tmp/jeff-cpu-baseline-profile.log`。
+
+### worker scratch と型・割当診断
+
+- `JEFF_CPU_DELTA_WORKSPACE=1` のforward-local worker workspaceを試作。state/full/tailはworker番号で所有し、層の@sync完了後に再利用する。headごとにstateをzero resetし、同時forwardで共有しない。畳み込みchannelループのSIMDも追加。
+- 同条件20回: median488.698334ms / p95519.214219ms、325,403,424bytes /14,153allocations、maxerror9.536743e-6。割当は減ったが速度改善は未確定。Accelerate singleは1403.1929285msと遅く、採用しない。データ `artifacts/cpu-tuning/workspace-{simd,accelerate-single}.json`。
+- fixture独立参照18件とscratch所有100件合格。workspace/MLP/並列flag組合せ、同backendの2同時forward、GC後、入力保持、返却済みscore保持を確認。実モデルの多形状・内部mask穴・同時実行の検証はまだ必要。
+- Cthulhu3.0.2で実モデルMLP→3引数mul!→5引数mul!→_mul!へ対話descent。配列と戻り値は具体型、transposeフラグはT/N。未使用mul!のトップ表示Anyだけで型不安定と判断しない。
+- workspace追加後JETが層loopのruntime dispatchを1件検出。optional MLP/Delta workspaceのUnionの組合せをforward入口で絞り込むhelperへ修正し、再診断中。
+- AllocCheck0.2.6はGPUCompiler<=1.23、Metal1.11.1は>=2.8.1を要求するためtools環境へ追加できない。`/private/tmp/jeff-alloccheck-env`にAllocCheck/AppleAccelerateのみを導入し、`tools/inspect_cpu_allocations.jl`を実行した。
+- AllocCheck静的検出/ウォームheap: projection mul! 0件/0bytes、owned gate7件/32bytes、worker workspace4件/495,248bytes、logits472件/325,403,424bytes。静的件数は実行回数ではない。gateの検出にはbroadcastのaliasコピー分岐が含まれ、非alias実測で巨大コピーが起きた証拠ではない。
+- Profile.Allocs 5%ではworker scratch生成が上位から消え、matmul、conv output、RoPE、RMSの配列が残る。native BLAS内部メモリはJulia heap測定に含まれない。ログ `/private/tmp/jeff-cpu-{alloccheck,workspace-profile,workspace-specialized-profile,types}.log`。
+- 分岐を絞ったhelper修正後、Profile/JETはexit0・No errors detected。warm単発483.421682ms /325,400,480bytes /GC5.495422ms（性能確定には別BenchmarkTools repeatを使う）。型付きIRではhidden/layer/MLP/gateのBodyがMatrix{Float32}、workspaceは意図した小Union。修正後fixture18+所有100件も合格。ログを `artifacts/cpu-tuning/{alloccheck,profile,types}.log` に保存した。
+- Intel profileの畳み込みweightのReinterpret/Reshape scalar accessを受け、tapごとに係数を連続Vectorへコピーするtrial。同じ20回F32/設定のparcel中央値430.2262715ms /p95455.427254ms /min400.624397 /max464.369811、327,174,560bytes /14,323allocations、maxerror9.536743e-6。基準495.254279msより約13.1%短いが2倍は未達。係数コピーの追加heapを認め、ロード時の小さいconv重みの配置変更で除去する案を次に評価する。生データ `artifacts/cpu-tuning/conv-coefficients.json`。
+- 同trialのOpenBLAS8/Julia8/scalar vector fallbackは20回median720.920916ms /p95747.074693ms /maxerror1.335144e-5。Accelerateを置き換える高速化として採用しない。`artifacts/cpu-tuning/openblas8.json`。CPU convだけをロード時にchannel-contiguousなMatrixのTransposeへ変更し、tapをviewで参照する版の検証・測定を続行中。
+- ユーザー指定によりMKLは使用しない。toolsのMKL/MKL_jll直接依存とbenchmark内のMKL分岐を除去。Apple Accelerateは別backendであり、現行比較に使用する。
+- load-time conv packing版20回はmedian435.8153635ms /p95449.114716ms、325,393,568heap bytes /14,107allocations、maxerror9.536743e-6（`conv-packed.json`）。
+- optional SIMD.jl 3.7 extensionを追加。8-wide Float32のconv、tap順序保持、fastmath/FMAなし、scalar tail、GC.@preserve付き。幅1/7/8/9/128/6144、tokens0/1/9、kernel1/4の独立ordered scalar比較72件合格。LoopVectorization0.12.174の@turbo smoke testはJulia1.13で動作したが、推論への採用・高速化は未確認。
+- `JEFF_CPU_FINAL_QUERY=1` は最後のfull attentionのQ/gateのみを最終tokenへ限定し、K/Vは全contextを保持するopt-in。n1/9/65とmask穴、fixture参照を含む11件追加、計129件をSIMD有無で通過。
+- SIMD+final query+scratchの20回はmedian441.457928ms /p95481.478997ms、310,815,216heap bytes /13,856allocations、maxerror1.04904175e-5（`simd-final-query.json`）。baseline比約1.12倍で、2倍は未達。scalar-packed版との速度差は改善の証拠にならず、SIMDのdefault有効化はしない。
+- `final-query-no-simd.json` の最初のrunはProfileプロセスの起動と重なったため比較から除外する。再計測は独立実行する。
+- `tools/compare_cpu_convolution.jl` に実幅6144×101×kernel4のmicro比較を追加（各100 samples、evals1）。medianは通常@simd407.211µs、explicit SIMD392.9815µs（完全一致）、@turbo477.856µs（最大誤差4.7683716e-7）。@turboはこの条件で遅く推論へ採用しない。microの差をend-to-endの改善と同一視しない。ログ `artifacts/cpu-tuning/convolution-comparison.log`。
+- final query/scalar SIMDの最新Profile/JETは指摘なし。warm単発399.812391ms /310,814,640heap bytes /GC7.614192ms。main threadではBLAS GEMM・libdispatch待ちが大きく、畳み込みだけの改善では2倍へ到達しない。Profileのnative内部symbol名はunwind上の表示であり、表示されたdouble/complex演算を実際に呼んだと断定しない。ログ `artifacts/cpu-tuning/profile-final-query.log`。
+- profile終了後の独立20回（final query / scratch有効、explicit SIMD無効）はmedian417.5303145ms /p95441.452236ms /min397.09657 /max465.09941、310,814,640heap bytes /13,838allocations、maxerror1.04904175e-5。baseline比1.186倍、heap bytes約20.9%減、2倍未達。`artifacts/cpu-tuning/final-query-no-simd-independent.json`。explicit SIMDの有効化は全体速度の優位を確認できずoffのまま。
+
+### chunk / worker / GEMM の追加切り分け
+
+- 前turnはSIMD/LV単体比較・独立full-forward repeat・Profile/JETでprogress。今回はissue4/5/6を再読し、`JEFF_CPU_DELTA_WORKERS`（available threads/value headsへ上限制約）と`JEFF_CPU_DELTA_CHUNK_SIZE`（正整数、既定64）を試験用に追加。workspace full/tailと実行spanは同じchunkサイズを使う。既定値は変えない。
+- `tools/sweep_cpu_delta.jl` はreal0.8B/parcel/F32、Accelerate8、Julia8、scratch/final query/MLP/vector/trim有効、chunk16/32/64/128×workers1/2/4/8を各5samplesでscreenする。全16設定の独立参照logit guard通過、maxerror<=1.04904175e-5。chunk64のworkers1/2/4/8 median619.74/528.30/495.66/456.02ms、chunk32の8workers444.29ms、chunk16の8workers454.83ms、chunk128の8workers561.57ms。5samplesのp95はtail確定に弱く、earlier417.53msとの時系列差もあるためchunk32を採用する根拠としない。ログ `artifacts/cpu-tuning/delta-sweep.jsonl`。
+- chunk1/3/16/32/64/128×workers1/2/4/8のfixture5件と不正値0の例外2件を追加、122件通過。既存129件も通過、計251件。ログ `artifacts/cpu-tuning/chunk-worker-tests.log`。
+- LoopVectorizationベースのpure-Julia GEMM候補Octavian0.3.29をtoolsの診断用依存に追加し、`tools/compare_cpu_gemm.jl`でreal first-layerのgate/downを20samples、101tokensで比較。gateはAccelerate1.55370ms /Octavian threaded1.84101ms /serial11.91360ms、downは1.67611/1.86755/12.10002ms、全てJulia heap0bytes。最大差<=9.536743e-7。threadedでも遅く、推論実装には導入しない。これはfirst-layer microであり全24層のweight sweepやfull-forwardではない。ログ `artifacts/cpu-tuning/gemm-comparison.log`。
+- Intel trialの条件・未達2倍・opt-in所有・chunkによる丸め変化・heapとpeakの違いを`docs/src/performance.md`へ追加。Apple M4の既存比較とは分離して記載した。
+- Accelerate4指定の2回のfull-forwardはJSON実値が8（median441.242223/441.4668055ms）だったため4thread測定ではない。AppleAccelerate0.7.0のローカルsourceを確認し、set_num_threadsは1ならsingle、1以外ならautomatic multiを選ぶだけと判明。独立smokeは要求1/2/4/8に対し報告1/8/8/8。4固定のbenchmarkと呼ばない。benchmarkは明示overrideを一般BLAS設定後に適用し、この制約をコメントへ記載した。古いsingle trialのJSONは1を記録しているため一律に無効化しない。
+
+### 層別phaseとworker-local小行列積 / recurrent試作
+
+- 前turnはchunk/worker screen、251 tests、Octavian大行列の不採用、Accelerateのthread toggle確認でprogress。`tools/time_cpu_phases.jl`はreal0.8B各層の実activationsを次層へ渡し、5 full passesの時間とheapを7 phaseに分ける診断。各passは独立parcel logit guardを通過。total402.54〜415.99ms、phase合計の中央値はpre RMS1.21 /attention251.02（delta202.82/full46.58）/post RMS2.39 /gate+up85.18 /activation21.85 /down41.03 /residual0.63ms。カテゴリーごとの中央値は足して厳密totalにならない。instrumentation自体も通常BenchmarkToolsとは異なる。ログ `artifacts/cpu-tuning/phases.jsonl`。
+- `tools/compare_cpu_delta_gemm.jl`で実際と同じhead-strided RHS/Float32、100samples、n37/64を比較。state×queryはAccelerate32.11/24.96µs、Octavian serial10.23/16.74µs。一方systemは7.11/16.38 vs11.28/21.54µs、state updateは19.85/18.99 vs20.15/41.08µs。全面置換の根拠ではない。
+- `JEFF_CPU_OCTAVIAN_DELTA=1`のoptional extensionでstate×RHSの2箇所だけworker-local serial Octavianへ試験切替。state各辺<=256/RHS列<=128を上限とし、他はBLASへfallback。alpha/beta、NaN destination(beta0)、head-strided/contiguous/transposed RHS、入力保持を含む144 tests通過、@code_warntypeはMatrix{Float32} body。ログ `artifacts/cpu-tuning/octavian-state-tests.log`。
+- 最初の`octavian-delta.json`はweakdep追加後のManifest metadata未解決によりBase.get_extension=nothingのままBLASで測定されていた（434.98ms）。候補評価から除外。Pkg.resolve後にextensionの登録を確認し、benchmark/verificationへextension存在assertを追加。SIMD extensionは同じ検査で実際に存在した。
+- extension有効の20samplesはmedian410.989238ms /p95439.118232ms /310,852,720heap bytes /15,028allocations、maxerror1.04904175e-5（`octavian-delta-active.json`）。earlier417.53msとの差は独立repeatなしで改善確定としない。2倍は未達、default off。
+- chunkの小BLAS/TRSMを省く別候補`JEFF_CPU_RECURRENT_DELTA=1`を試作。Float32のstate×key→rank-one state更新＋state×queryをrow方向@simdで融合。worker所有stateをheadごとresetし、tokenごとprojection/resultをresetする。forward scratchはn1の既存bufferとstateだけを保持しchunk scratchを不要にする（永続cacheなし）。chunkの丸め順序とは異なるため参照を再検証する。
+- recurrent有効で既存251件＋n1/9/65/129/256×mask穴×parallel有無のchunked比較20件=271件通過（`recurrent-tests-fixed.log`）。最初はrecurrent scratch縮小時に不正chunk0の検証を迂回するテスト1件失敗があり、scratch選択前に必ず正整数検証するよう修正した。実モデルfull-forward計測は別に行う。
+- recurrentのreal0.8B/parcel20samplesはmedian408.828974ms /p95449.153710ms /min384.642854 /max450.465069、291,769,968heap bytes /5,068allocations、maxerror9.536743e-6。baseline495.254279msから約1.21倍だが2倍未達。件数削減ほど時間は短縮しない。以前の417.53msとの差は独立repeatなしで確定としない。`artifacts/cpu-tuning/recurrent-delta.json`。
+- recurrentの独立50samples repeatはmedian402.390980ms /p95455.791675ms /min377.902317 /max481.109223、heap291,769,968bytes /5,068件、maxerror9.536743e-6。初期495.25msの約1.23倍（time約18.75%減）、heap約25.7%減、件数約77.6%減。2倍基準247.63ms未達。`artifacts/cpu-tuning/recurrent-delta-repeat50.json`。
+- recurrent有効のProfile/JETはNo errors detected、warm単発367.860271ms /291,769,968bytes /GC7.114798ms。main threadでは引き続きprojection GEMMとlibdispatchが多く、サンプル配列生成としてmatmulやQ/Kコピーが残る。ログ `artifacts/cpu-tuning/profile-recurrent.log`。AllocCheck診断にrecurrent kernel単独を追加し、全forward allocationと分離して再確認する。
+- isolated AllocCheck0.2.6の再診断: recurrent kernelは静的指摘0 /ウォームheap0bytes、projection mul!も0/0。worker scratchは静的5 /70,032bytes（recurrent用state+n1 scratchを新規作成）、owned gate7 /32bytes、全logits536 /291,769,968bytes。静的件数は未実行のchunk/例外分岐も含み実行allocation件数ではない。kernelの0割当は重み投影・Q/Kコピー・forward workspace生成を含まない。ログ `artifacts/cpu-tuning/alloccheck-recurrent.log`。
+
+### Intel の投影配置 / BLIS micro比較
+
+- 前turnはrecurrent SIMD実装・271 tests・独立50 samples・JET/Profile/AllocCheckでprogress。今回はmicroを物理transposeとright-product+copyへ拡張。Intel/Accelerate8でgate通常1.61411ms→packed1.35877ms、down1.79932ms→packed1.58713ms（各20samples、F32/101tokens、全Julia heap0）。right+copyは2.11322/1.97171msと遅い。M4ではtransposeMLPに差がなかったが、別CPUの今回のmicroはfull-forward trialを評価する根拠になる。まだ全forward改善は未証明。`gemm-orientation-accelerate-fixed.log`。最初のrunはpermutedims!のperm引数欠落で途中失敗し、(2,1)指定後に全対象を再測定した。
+- 非MKL候補BLISBLAS0.2.0 /blis_jll2.0.0+2をtoolsの診断用依存に追加。macOS/x86_64のartifact利用とBLIS8 threadsを確認。gate通常2.30516ms /packed2.50571ms、down1.44855 /packed2.62688ms。gateはAccelerateより遅く、全面採用しない。source上はLP64/ILP64 BLISとLAPACKをstartup時にLBTへforwardする。推論中のglobal backend変更は行わない。`gemm-orientation-blis.log`。
+- ユーザーの「改善ごとにcommit and push」指示を受け、recurrentを含む現段階をcheckpointにする。`julia --threads=8 --project=test test/runtests.jl`は全testset成功、`git diff --check`成功。2倍達成とは扱わず、既定offのtrialと測定条件をdocsに明記してコミットする。ログ `artifacts/cpu-tuning/checkpoint-tests.log`。
+
 計測環境: Apple M4、Julia 1.13.1、Metal 1.11.1、PyTorch 2.14.0。
 モデルは `mstrasser/Jeff-Qwen3.5-0.8B` の revision
 `0f212b3e72acb4dde3f7da61e925d6ab7f819990`。

@@ -1,5 +1,62 @@
 # Measured inference speed
 
+## Intel CPU optimization trial (2026-10-01)
+
+These results are separate from the Apple M4 measurements below. On an Intel
+Core i9-9900K, Julia 1.13.1, Float32, Julia/BLAS 8 threads, Apple Accelerate
+0.7.0, the same pinned 0.8B parcel input (B1, padded length 256, active 101)
+measured 495.25 ms median / 511.03 ms p95 before these changes (20 warm calls).
+MKL is not used. The comparison baseline already enables parallel heads,
+MLP workspace, vector math, and leading-padding trim.
+
+CPU convolution weights are now channel-contiguous at load time. Optional
+`JEFF_CPU_DELTA_WORKSPACE=1` reuses worker-owned state/full/tail buffers across
+layers within one forward, with a reset per head and no shared persistent
+cache. Optional `JEFF_CPU_FINAL_QUERY=1` computes only the last query in the
+last full-attention layer; keys and values still read the entire context.
+Together these measured 417.53 ms median / 441.45 ms p95, 310,814,640 cumulative
+Julia heap bytes / 13,838 allocations, versus 392,752,624 bytes / 22,671
+allocations initially. Maximum logit error versus the saved independent
+reference was `1.05e-5`. This is **1.19×, not the requested 2×**; the target is
+at most 247.63 ms under the same conditions. Heap bytes do not measure peak
+resident memory or native BLAS scratch storage.
+
+Importing SIMD activates an optional convolution extension only when
+`JEFF_CPU_SIMD=1`. It retains tap order and uses no fast-math. Its microbenchmark
+was slightly faster, but whole-forward improvement was not demonstrated;
+keep it disabled for the reported configuration. A LoopVectorization `@turbo`
+convolution trial was slower and is not used in inference.
+
+For experimental tuning, `JEFF_CPU_DELTA_WORKERS` limits workers to the
+available Julia threads and value heads (default: available threads), and
+`JEFF_CPU_DELTA_CHUNK_SIZE` selects a positive chunk size (default: 64).
+Changing chunk size changes floating-point accumulation order and requires
+reference validation. `tools/sweep_cpu_delta.jl` screens 1/2/4/8 workers and
+16/32/64/128 chunks, using five samples per configuration; its p95 is a
+screening statistic, not a reliable tail estimate. Use independent, longer
+full-forward repeats before adopting a setting. These controls are not an
+automatic performance policy for other CPUs, lengths, batches, or checkpoints.
+
+Two further experiments remain disabled by default. Importing Octavian and
+setting `JEFF_CPU_OCTAVIAN_DELTA=1` uses its serial kernel for only two small
+worker-owned state products, without changing BLAS threading globally; large
+MLP products still use BLAS. The 20-call median was 410.99 ms, not evidence of
+a substantial whole-model improvement. The benchmark asserts that the extension
+actually loaded, rather than relying on the environment flag alone.
+
+`JEFF_CPU_RECURRENT_DELTA=1` replaces chunk products and triangular solves with
+token-wise Float32 state updates fused in column-major SIMD loops. It resets
+state per head and token scratch per token, without persistent caches. On the
+same input, its 20-call median was 408.83 ms / p95 449.15 ms, with 291,769,968
+Julia heap bytes / 5,068 allocations and maximum reference logit error
+`9.54e-6`. Allocation counts improved much more than latency. The two paths use
+different summation orders: tiny-model reference, mask/length tests, and this
+single real input do not establish accuracy on every checkpoint or dataset.
+Neither experiment establishes the 2× target.
+An independent 50-call recurrent repeat measured 402.39 ms median / 455.79 ms
+p95 with the same allocation figures and reference error: about 1.23× the
+original Intel baseline, still slower than the required 247.63 ms.
+
 ## Real 0.8B checkpoint: the README demo
 
 These benchmarks use **Jeff's actual trained 0.8B weights**, not the tiny test

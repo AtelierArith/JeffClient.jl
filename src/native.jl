@@ -50,6 +50,7 @@ function native_sequence_start(reference, mask, row)
 end
 native_batch_logits(backend, ids, mask) = nothing
 native_mlp_weights(device, gate, up, down) = (; gate, up, down)
+native_conv_weights(device, weight) = weight
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
 
@@ -130,7 +131,10 @@ function NativeBackend(checkpoint::AbstractString; device::Symbol = :cpu)
                 z = get("linear_attn.in_proj_z.weight"),
                 a = get("linear_attn.in_proj_a.weight"),
                 b = get("linear_attn.in_proj_b.weight"),
-                conv = dropdims(get("linear_attn.conv1d.weight"); dims = 2),
+                conv = native_conv_weights(
+                    Val(device),
+                    dropdims(get("linear_attn.conv1d.weight"); dims = 2),
+                ),
                 # Fixed inference weights: compute the decay multiplier once
                 # on this backend, preserving its Float32 exp implementation.
                 a_decay = -1.0f0 .* exp.(get("linear_attn.A_log")),

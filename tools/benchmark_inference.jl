@@ -3,16 +3,24 @@ using JeffClient
 using LinearAlgebra
 using Profile
 import JSON
+if get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
+    import Octavian
+    Base.get_extension(JeffClient, :JeffClientOctavianExt) === nothing &&
+        error("Octavian extension was not loaded; run Pkg.resolve() before benchmarking.")
+end
+if get(ENV, "JEFF_CPU_SIMD", "0") == "1"
+    import SIMD
+    Base.get_extension(JeffClient, :JeffClientSIMDExt) === nothing &&
+        error("SIMD extension was not loaded; run Pkg.resolve() before benchmarking.")
+end
 
 if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1"
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
-    if haskey(ENV, "JEFF_CPU_ACCELERATE_THREADS")
-        AppleAccelerate.set_num_threads(parse(Int, ENV["JEFF_CPU_ACCELERATE_THREADS"]))
-    end
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
         error("Accelerate BLAS forwarding requires macOS 13.4 or later.")
 end
+
 
 if length(ARGS) >= 2 && ARGS[2] == "metal"
     import Metal
@@ -43,6 +51,12 @@ function main()
         Metal.allowscalar(false)
     end
     BLAS.set_num_threads(parse(Int, get(ENV, "JEFF_BLAS_THREADS", "8")))
+    # Apply backend overrides after general BLAS setup. Accelerate 0.7 only
+    # selects single-threaded (1) or automatic multithreading (anything else).
+    if get(ENV, "JEFF_CPU_ACCELERATE", "0") == "1" &&
+       haskey(ENV, "JEFF_CPU_ACCELERATE_THREADS")
+        AppleAccelerate.set_num_threads(parse(Int, ENV["JEFF_CPU_ACCELERATE_THREADS"]))
+    end
     references = JSON.parsefile(ARGS[3])
     cases = references isa AbstractDict ? references["cases"] : references
     sample = cases[index]
@@ -88,11 +102,21 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_recurrent_delta_enabled"] =
+                get(ENV, "JEFF_CPU_RECURRENT_DELTA", "0") == "1"
+            result["cpu_octavian_delta_enabled"] =
+                get(ENV, "JEFF_CPU_OCTAVIAN_DELTA", "0") == "1"
+            result["cpu_final_query_enabled"] = get(ENV, "JEFF_CPU_FINAL_QUERY", "0") == "1"
+            result["cpu_simd_enabled"] = get(ENV, "JEFF_CPU_SIMD", "0") == "1"
             result["cpu_parallel_heads_enabled"] =
                 get(ENV, "JEFF_CPU_PARALLEL_HEADS", "0") == "1"
             result["julia_worker_threads"] = Threads.nthreads(:default)
             result["cpu_mlp_workspace_enabled"] =
                 get(ENV, "JEFF_CPU_MLP_WORKSPACE", "0") == "1"
+            result["cpu_delta_workspace_enabled"] =
+                get(ENV, "JEFF_CPU_DELTA_WORKSPACE", "0") == "1"
+            result["cpu_delta_chunk_size"] = JeffClient.cpu_delta_chunk_size()
+            result["cpu_delta_workers"] = JeffClient.cpu_delta_workers(backend.config)
             result["cpu_inplace_delta_rms_enabled"] =
                 get(ENV, "JEFF_CPU_INPLACE_DELTA_RMS", "0") == "1"
             result["cpu_vector_math_enabled"] = get(ENV, "JEFF_CPU_VECTOR_MATH", "0") == "1"
