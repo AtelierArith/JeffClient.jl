@@ -1,5 +1,108 @@
 # Measured inference speed
 
+## Current source CPU benchmarks (2026-10-01)
+
+Measured commit [`5f2d0e9`](https://github.com/AtelierArith/JeffClient.jl/commit/5f2d0e9e963b9a812bf561eeb37202b7334e513a)
+on **Apple M4 / arm64 macOS / Julia 1.13.1 / Float32**, with **8 Julia workers**
+and **30 warmed forwards per configuration**. The Intel trials and older M4
+measurements below remain historical results; compare only matched hardware
+and settings.
+
+All rows use **Jeff's actual trained 0.8B weights**, checkpoint
+`mstrasser/Jeff-Qwen3.5-0.8B`, pinned to
+`0f212b3e72acb4dde3f7da61e925d6ab7f819990`. The input is case 1 of
+`examples/data/parcel_reference.json`: B1, logical length 256, 101 active tokens.
+No ONNX or tiny test graph is involved. Timing includes `logits`, the trained
+readout and scores on CPU. Loading, download, tokenization and first-call
+compilation are excluded. Each configuration ran in a separate process,
+sequentially, with inherited tuning overrides cleared.
+
+| Configuration | Computed tokens | Median | p95 | Julia heap per forward | Allocations |
+|---|---:|---:|---:|---:|---:|
+| Default / OpenBLAS 8 | 256 | 1503.13 ms | 1545.25 ms | 916.4 MiB | 22,016 |
+| README / Accelerate | 101 | 183.34 ms | 189.79 ms | 367.6 MiB | 22,707 |
+| Portable / projection workspace off | 101 | 351.98 ms | 360.79 ms | 253.3 MiB | 12,601 |
+| Portable / projection workspace on | 101 | 359.10 ms | 363.93 ms | 104.0 MiB | 11,895 |
+| Accelerate + latest opt-ins | 101 | 205.76 ms | 213.28 ms | 121.0 MiB | 4,380 |
+
+**The README configuration was fastest among these measured settings.**
+Its advantage over the default includes skipping padding and changing the
+math library, so the rows do not perform equal arithmetic work.
+
+The new Delta projection workspace reduced portable-path cumulative heap
+allocation by **58.9%**, but did not improve its median latency on this M4
+(351.98 → 359.10 ms). These are single 30-call trials, not proof of a general
+regression or improvement. The Intel gain reported below does not establish
+an M4 gain. Accelerate with the latest opt-ins likewise allocates less than
+the README setting but was slower. Heap allocation is not peak resident
+memory, live workspace size or native BLAS scratch memory.
+
+All five runs passed the saved independent PyTorch logit guard; maximum
+absolute errors were 1.05e-5–1.24e-5. This checks one prepared input, not
+classification accuracy across a dataset. Exact results, flag values, model
+load/first-call times, retained model memory and process peak RSS are preserved
+in the [raw benchmark JSON](assets/benchmarks/cpu-2026-10-01-5f2d0e9.json).
+Python was not rebenchmarked in this refresh; no new Python speed ratio is
+claimed.
+
+Configuration details:
+
+- **Default:** optional flags off, OpenBLAS 8 threads, no padding trim.
+- **README:** Accelerate 0.7.0, vector math, parallel Delta heads, MLP workspace
+  and trim. Accelerate reports 10 framework-managed threads; LBT's reported
+  count of 8 does not represent its actual worker count.
+- **Portable:** OpenBLAS 1 thread, LoopVectorization 0.12.174 portable vector
+  math and blockwise SiLU, Delta normalization loop, parallel projections,
+  projection thread scope, parallel full-attention heads, recurrent DeltaNet,
+  parallel Delta heads, MLP/Delta workspace, trim and final query. The two rows
+  differ only in `JEFF_CPU_DELTA_PROJECTION_WORKSPACE`. Domain guards retain
+  scalar fallback where needed.
+- **Accelerate + latest opt-ins:** README plus Delta workspace, recurrent
+  DeltaNet, final query, Delta normalization loop and Delta projection
+  workspace. Portable vector math and parallel projections/full heads are off.
+
+For context, the preceding M4 refresh on `4dd4a40` measured default 1,491.94 ms
+and README 183.05 ms. The current 1,503.13 / 183.34 ms medians show no clear
+speed gain for those unchanged configurations; no statistical significance is
+claimed. [Previous raw results](assets/benchmarks/cpu-2026-10-01.json) retain
+that snapshot's source hash and settings.
+
+### Reproduce these measurements
+
+Use a fresh shell without other `JEFF_CPU_*` overrides. The tools environment
+uses this checkout's source. Resolve a stale ignored Manifest before running:
+
+```sh
+julia --project=tools -e 'using Pkg; Pkg.resolve(); Pkg.instantiate(; workspace=true)'
+CHECKPOINT=$(julia --project=tools -e 'using JeffClient; print(resolve_checkpoint("mstrasser/Jeff-Qwen3.5-0.8B"; revision="0f212b3e72acb4dde3f7da61e925d6ab7f819990"))')
+
+# Default.
+JEFF_BLAS_THREADS=8 julia --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 30 artifacts/cpu-current-5f2d0e9/default.json
+
+# README / Accelerate.
+JEFF_CPU_ACCELERATE=1 JEFF_CPU_VECTOR_MATH=1 JEFF_CPU_PARALLEL_HEADS=1 \
+JEFF_CPU_MLP_WORKSPACE=1 JEFF_CPU_TRIM_PADDING=1 \
+julia --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 30 artifacts/cpu-current-5f2d0e9/readme-accelerate.json
+
+# Portable path: matched comparison of projection workspace off/on.
+for projection_workspace in 0 1; do
+  JEFF_BLAS_THREADS=1 JEFF_CPU_PORTABLE_VECTOR_MATH=1 JEFF_CPU_VECTOR_MATH_BLOCKS=1 \
+  JEFF_CPU_DELTA_NORM_LOOP=1 JEFF_CPU_PARALLEL_PROJECTIONS=1 \
+  JEFF_CPU_PROJECTION_THREAD_SCOPE=1 JEFF_CPU_PARALLEL_FULL_HEADS=1 \
+  JEFF_CPU_RECURRENT_DELTA=1 JEFF_CPU_PARALLEL_HEADS=1 JEFF_CPU_MLP_WORKSPACE=1 \
+  JEFF_CPU_DELTA_WORKSPACE=1 JEFF_CPU_TRIM_PADDING=1 JEFF_CPU_FINAL_QUERY=1 \
+  JEFF_CPU_DELTA_PROJECTION_WORKSPACE="$projection_workspace" \
+  julia --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 30 "artifacts/cpu-current-5f2d0e9/portable-${projection_workspace}.json"
+done
+
+# Accelerate plus latest opt-ins.
+JEFF_CPU_ACCELERATE=1 JEFF_CPU_VECTOR_MATH=1 JEFF_CPU_PARALLEL_HEADS=1 \
+JEFF_CPU_MLP_WORKSPACE=1 JEFF_CPU_TRIM_PADDING=1 JEFF_CPU_DELTA_WORKSPACE=1 \
+JEFF_CPU_FINAL_QUERY=1 JEFF_CPU_RECURRENT_DELTA=1 JEFF_CPU_DELTA_NORM_LOOP=1 \
+JEFF_CPU_DELTA_PROJECTION_WORKSPACE=1 \
+julia --threads=8 --startup-file=no --project=tools tools/benchmark_inference.jl "$CHECKPOINT" cpu examples/data/parcel_reference.json 1 30 artifacts/cpu-current-5f2d0e9/accelerate-projection-workspace.json
+```
+
 ## Intel CPU optimization trial (2026-10-01)
 
 These results are separate from the Apple M4 measurements below. On an Intel

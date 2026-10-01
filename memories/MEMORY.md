@@ -845,3 +845,15 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 最新Allocsではnative_residual_rms/native_rms/native_rope/native_linearが残る。heap0は目標にしない。既存logitsのfresh score、forward-local workspace、spawn taskには割当が必要。caller-owned logits!/永続scratch/worker方式変更は別の所有契約と検証を要する。
 - tools/compare_cpu_projection_kernels.jlは同8worker行分割でOpenBLAS/Octavian serial/直接turboを比較。101tokens gate1.260/1.854/4.136ms、down1.231/1.859/3.873、qkv2.873/3.836/13.215。参照guard通過、Matrix materializationでも逆転なし。不採用。150個の大きなweightのexact zero fractionは全て0で、ゼロ行/列pruningの根拠なし（weight-zero-structure.jsonl）。
 - phase toolはprojection workspaceを実際に渡す。手書きDelta stage toolはworkspace path未対応のためflag1を明示的に拒否し、誤った比較を避ける。次候補はRMS/残差融合、MLP down出力再利用、copyなしQKV/Z融合。時間改善は必ず全forwardで再確認する。
+
+## CPU refresh after pull: 5f2d0e9 on Apple M4
+
+- ユーザーのpull後に現状CPU benchmark/docsを再取得。source5f2d0e9、測定時tracked worktree clean。既存未追跡assetsには直前4dd4a40の測定JSONが残っていたため比較snapshotとして保存し、新規JSONはsourcehash付き別名。
+- real0.8B pinnedrevision/Float32/parcelB1L256active101/Julia1.13.1/AppleM4、8workers/各30warmforward、process逐次/override除去。
+- default: median1503.129ms/p951545.248ms/960896160heap bytes/22016allocs/maxerror1.144409e-05。
+- readme-accelerate: median183.340ms/p95189.787ms/385445744heap bytes/22707allocs/maxerror1.239777e-05。
+- portable-control: median351.977ms/p95360.786ms/265559088heap bytes/12601allocs/maxerror1.049042e-05。
+- portable-projection-workspace: median359.101ms/p95363.926ms/109062416heap bytes/11895allocs/maxerror1.049042e-05。
+- accelerate-projection-workspace: median205.757ms/p95213.276ms/126843856heap bytes/4380allocs/maxerror1.049042e-05。
+- projectionWorkspaceのportable matched比較でheap58.9%減、M4中央値の速度改善は未確認。Intel結果をM4へ一般化しない。全5runs参照guard通過。
+- docs/src/performance.md冒頭に現行source5設定表、前snapshot比較、全reproducecommandsを追加。raw集約docs/src/assets/benchmarks/cpu-2026-10-01-5f2d0e9.json。今回はPython再測定なし。
