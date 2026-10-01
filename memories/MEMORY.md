@@ -873,3 +873,11 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - 同Intel i9-9900K/Float32/real0.8B/parcel B1L256active101/Julia8/OpenBLAS1/current flags、30samples294.338ms/p95325.456ms、独立30samples293.934ms/p95313.750ms、103,750,032heap bytes/11,823allocs/maxerror1.2398e-5。matched flagoff30samples297.079ms/p95322.429ms/113,554,448bytes/11,919allocs。速度差約1%、heap約9.8MB減、普遍的速度改善とは主張しない。固定495.254ms基準比約1.685倍、247.627ms目標未達。
 - 追加46checksと既存activation126/block18496/native597checksが8worker/1worker両方exit0。projectionのinput/weight alias、parallel/serial、tokens1/9/65、MLP workspaceなし/あり、入力保持を検証。全test suite exit0、JET core+portable extension No errors detected、Profile/Allocs5%取得。warm285.602ms/同heap/GC0。
 - mlp-residual-fusion{,-repeat,-control}.json、mlp-residual-fusion-{validation,single-worker,checkpoint-tests}.log、profile-mlp-residual-fusion.log。phase toolもbeta=1の経路を測定するよう更新。リモート9ded04aのM4 docs/journalと手元の記録は両方保持してff pull済み、実装差はなく計測条件を混同しない。
+
+## CPU optimization stopping checkpoint / QKV-Z fusion not adopted
+
+- ユーザーの「ここで潮時」「まとめましょう」に従い、新規最適化と進行中の検証を停止。検証済み・push済みの実装7ccfe19を維持する。固定Intel基準495.254ms→293.934ms（約1.685倍）、2倍目標247.627msは未達であり、達成とは扱わない。heap392,752,624→103,750,032bytes（約73.6%減）、Float32/同入力/Julia8、最終OpenBLAS1、MKLなし。M4記録と混同しない。
+- QKV/Z fusion試作はCPU load時にhcatし元qkv/zを同じMatrixのviewに置換、forward-localなcombined出力をviewで分割してコピーを省いた。保持modelは約3.010638GBでほぼ不変。元版は追加41checks＋既存checksが1/8worker両方exit0、全test suite exit0、saved independent parcel参照最大誤差1.1444e-5。
+- 同Intel/current flags/各30samples、非融合293.576ms/p95317.125ms、融合291.372ms/p95321.907ms、独立repeat292.594ms/p95324.978ms。改善約0.3〜0.8%、heap103,750,288→103,666,176bytes、allocs11,827→10,890。load2.239→2.529s、peak process RSS5.305→5.994GB（load/compileを含む高水位、warm scratch量ではない）。利点が小さくロード/複雑性コストが増えるため不採用。
+- 元fusion版のJETはworkspaceの相関が失われたNamedTuple unionにruntime dispatch6件を報告。factoryを分離した版の30sample benchmarkは291.208ms/参照guard通過まで完了したが、その版のJET/Profile/全test再検証はユーザーの停止指示で中断。型警告が解消したとは未確認。途中runは完成済み検証として扱わない。
+- 自分の試作diffをignored artifacts/cpu-tuning/qkvz-fusion-trial.patchに退避し、src/native.jl/native_cpu.jl/test/native.jl/tools/benchmark_inference.jlをapply_patchで7ccfe19へ復元。中断したjobの専用process group停止とsession exit143を確認。qkvz-fusion{,-repeat,-control,-typed}.json、qkvz-fusion-{validation,single-worker,checkpoint-tests}.log、profile-qkvz-fusion.logを保持し、再開時の判断材料とする。

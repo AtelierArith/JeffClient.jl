@@ -750,3 +750,20 @@ The maximum reference error was 1.2398e-5; alias, ownership, one/eight-worker,
 full-suite and JET checks passed. The fixed Intel baseline speedup is about
 1.69 times, still below the two-times goal. This option has not been benchmarked
 on Apple M4 or Linux.
+
+### Optimization stopping checkpoint
+
+The verified CPU implementation checkpoint is `7ccfe19`. On the Intel setup
+above, the warmed median decreased from the fixed 495.254 ms baseline to
+293.934 ms (about 1.69 times faster), and Julia heap allocation decreased from
+392,752,624 to 103,750,032 bytes. The requested two-times target of 247.627 ms
+was not reached. Optimization was stopped at the user's request.
+
+A copy-free QKV/Z projection fusion trial was not adopted: matched 30-forward
+medians were 293.576 ms without fusion and 291.372 ms with fusion; an independent
+fusion repeat was 292.594 ms. The small difference came with increased loading
+time (2.239 to 2.529 seconds) and process peak RSS (5.305 to 5.994 GB, including
+loading and compilation). Numerical/ownership tests passed, but the initial
+workspace type branching generated six JET runtime-dispatch reports. A revised
+factory's benchmark completed; its full diagnostic revalidation was interrupted
+when work stopped. The trial is absent from the verified implementation.
