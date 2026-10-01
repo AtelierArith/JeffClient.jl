@@ -1,0 +1,3 @@
+[submodule "extern/jeff"]
+	path = extern/jeff
+	url = https://github.com/firelex/jeff

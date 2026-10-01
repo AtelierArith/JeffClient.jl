@@ -9,9 +9,6 @@
 /models/
 /artifacts/
 
-# Reference checkout: a separate Git repository, not a submodule here.
-/extern/jeff/
-
 # Generated indexes and runtime environments.
 /.codegraph/
 /:memory:.ses
