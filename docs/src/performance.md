@@ -737,3 +737,16 @@ input/returned-score ownership checks passed, as did the full test suite and
 JET checks. These results do not establish zero allocation or dataset accuracy.
 Against the fixed 495.254 ms pre-optimization Intel baseline, the repeat is
 about 1.67 times faster; the two-times target remains unmet.
+
+`JEFF_CPU_MLP_RESIDUAL_FUSION=1` additionally accumulates the MLP down
+projection directly into the layer-owned residual using BLAS `beta=1`.
+It is disabled by default and does not share mutable buffers between forwards.
+On the same Intel/input/Float32/eight-worker/OpenBLAS-one-thread configuration,
+30 forwards measured 294.338 ms and an independent 30-forward repeat measured
+293.934 ms, versus a matched flag-off run of 297.079 ms. The roughly one-percent
+timing difference is small; this is not a universal speedup claim.
+Heap allocation decreased from 113,554,448 to 103,750,032 bytes per forward.
+The maximum reference error was 1.2398e-5; alias, ownership, one/eight-worker,
+full-suite and JET checks passed. The fixed Intel baseline speedup is about
+1.69 times, still below the two-times goal. This option has not been benchmarked
+on Apple M4 or Linux.

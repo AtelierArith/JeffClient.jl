@@ -107,6 +107,8 @@ function main()
             "max_logit_error" => max_error,
         )
         if device == :cpu
+            result["cpu_mlp_residual_fusion_enabled"] =
+                get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1"
             result["cpu_delta_projection_workspace_enabled"] =
                 get(ENV, "JEFF_CPU_DELTA_PROJECTION_WORKSPACE", "0") == "1"
             result["cpu_vector_math_blocks_enabled"] =

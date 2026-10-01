@@ -16,7 +16,7 @@ function phase_layer(
     mlp_buffers,
     delta_buffers,
     final,
-    projections = nothing,
+    delta_projections = nothing,
 )
     pre = @timed JeffClient.native_rms(hidden, layer.input_norm, cfg.eps)
     attention = @timed if layer.attention.kind == :full
@@ -30,7 +30,7 @@ function phase_layer(
             mask,
             cfg,
             delta_buffers,
-            projections,
+            delta_projections,
         )
     end
     post = @timed if final
@@ -46,8 +46,17 @@ function phase_layer(
         JeffClient.cpu_projection!(up, layer.mlp.up, normalized)
     end
     activation = @timed JeffClient.cpu_owned_mlp_gate!(gate, up)
-    down = @timed JeffClient.native_linear(layer.mlp.down, activation.value)
-    added = @timed JeffClient.native_residual_add!(residual, down.value)
+    fused = get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1"
+    down = @timed if fused
+        JeffClient.cpu_projection!(residual, layer.mlp.down, activation.value, 1.0f0)
+    else
+        JeffClient.native_linear(layer.mlp.down, activation.value)
+    end
+    added = @timed if fused
+        residual
+    else
+        JeffClient.native_residual_add!(residual, down.value)
+    end
     phases = (pre, attention, post, projections, activation, down, added)
     return added.value, [p.time for p in phases], [p.bytes for p in phases]
 end

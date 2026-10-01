@@ -13,11 +13,15 @@ native_cpu_silu!(output, scratch) = native_cpu_silu!(output)
 cpu_owned_mlp_gate!(gate, up) =
     cpu_portable_gate!(gate, up) ? gate : native_mlp_gate!(gate, up)
 
-function cpu_projection_block!(output, weight, input, rows)
+function cpu_projection_block!(output, weight, input, rows, beta = 0.0f0)
     lhs =
         weight isa Transpose{Float32,Matrix{Float32}} ? @view(parent(weight)[rows, :]) :
         transpose(@view(weight[:, rows]))
-    mul!(@view(output[rows, :]), lhs, input)
+    if iszero(beta)
+        mul!(@view(output[rows, :]), lhs, input)
+    else
+        mul!(@view(output[rows, :]), lhs, input, 1.0f0, beta)
+    end
     return nothing
 end
 
@@ -85,12 +89,17 @@ function native_full_heads!(out::Matrix{Float32}, q, k, v, qgate, scores_mask, c
     return out
 end
 
-function cpu_projection!(output, weight, input)
+function cpu_projection!(output, weight, input, beta = 0.0f0)
     size(input, 1) == size(weight, 1) &&
     size(output) == (size(weight, 2), size(input, 2)) ||
         throw(DimensionMismatch("Projection shapes differ."))
     if Base.mightalias(output, input) || Base.mightalias(output, weight)
-        return copyto!(output, native_matmul(transpose(weight), input))
+        product = native_matmul(transpose(weight), input)
+        if iszero(beta)
+            return copyto!(output, product)
+        end
+        output .= product .+ beta .* output
+        return output
     end
     workers = min(Threads.nthreads(:default), size(output, 1))
     if get(ENV, "JEFF_CPU_PARALLEL_PROJECTIONS", "0") != "1" ||
@@ -98,7 +107,8 @@ function cpu_projection!(output, weight, input)
        size(output, 1) < 256 ||
        length(output) * size(input, 1) < 1_000_000 ||
        cpu_projection_blas_threads() != 1
-        return mul!(output, transpose(weight), input)
+        return iszero(beta) ? mul!(output, transpose(weight), input) :
+               mul!(output, transpose(weight), input, 1.0f0, beta)
     end
     @sync for worker = 1:workers
         rows =
@@ -106,7 +116,7 @@ function cpu_projection!(output, weight, input)
                 worker*size(output, 1),
                 workers,
             )
-        Threads.@spawn cpu_projection_block!(output, weight, input, rows)
+        Threads.@spawn cpu_projection_block!(output, weight, input, rows, beta)
     end
     return output
 end
@@ -145,6 +155,22 @@ function native_mlp(mlp, x::Matrix{Float32}, buffers::Tuple)
     return native_linear(mlp.down, cpu_owned_mlp_gate!(gate, up))
 end
 
+function cpu_mlp_add!(residual, mlp, x, buffers)
+    get(ENV, "JEFF_CPU_MLP_RESIDUAL_FUSION", "0") == "1" ||
+        return native_residual_add!(residual, native_mlp(mlp, x, buffers))
+    # The residual belongs to this layer. Gate/up remain private workspace;
+    # beta=1 accumulates the down projection without a temporary output.
+    gate, up = if buffers === nothing
+        (native_linear(mlp.gate, x), native_linear(mlp.up, x))
+    else
+        gate, up = buffers
+        cpu_projection!(gate, mlp.gate, x)
+        cpu_projection!(up, mlp.up, x)
+        (gate, up)
+    end
+    return cpu_projection!(residual, mlp.down, cpu_owned_mlp_gate!(gate, up), 1.0f0)
+end
+
 function cpu_layer_with_mlp_workspace(
     layer,
     x,
@@ -160,7 +186,7 @@ function cpu_layer_with_mlp_workspace(
         full_attention(layer.attention, normalized, mask, cfg) :
         delta_attention(layer.attention, normalized, mask, cfg, delta_buffers, projections)
     residual, normalized = native_residual_rms(x, mixed, layer.post_norm, cfg.eps)
-    return native_residual_add!(residual, native_mlp(layer.mlp, normalized, buffers))
+    return cpu_mlp_add!(residual, layer.mlp, normalized, buffers)
 end
 
 function cpu_delta_rms!(output::Matrix{Float32}, weight::AbstractVector{Float32}, eps)
@@ -705,6 +731,6 @@ function cpu_hidden_forward(
     residual = @views hidden[:, end:end] .+ mixed[:, end:end]
     normalized = native_rms(residual, layer.post_norm, cfg.eps)
     buffers = workspace === nothing ? nothing : workspace.final
-    native_residual_add!(residual, native_mlp(layer.mlp, normalized, buffers))
+    cpu_mlp_add!(residual, layer.mlp, normalized, buffers)
     return native_rms(residual, final_norm, cfg.eps)
 end

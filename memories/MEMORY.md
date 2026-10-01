@@ -857,3 +857,19 @@ julia --project=tools tools/inspect_typed_source.jl CHECKPOINT REFERENCE cached-
 - accelerate-projection-workspace: median205.757ms/p95213.276ms/126843856heap bytes/4380allocs/maxerror1.049042e-05。
 - projectionWorkspaceのportable matched比較でheap58.9%減、M4中央値の速度改善は未確認。Intel結果をM4へ一般化しない。全5runs参照guard通過。
 - docs/src/performance.md冒頭に現行source5設定表、前snapshot比較、全reproducecommandsを追加。raw集約docs/src/assets/benchmarks/cpu-2026-10-01-5f2d0e9.json。今回はPython再測定なし。
+
+## CPU RMS / residual fusion probe (not adopted)
+
+- 前turnはFlux/NNlibの公式source読解、workspaceの記録更新でprogress。今回5f2d0e9でDelta projection workspaceと診断toolをcommit/push済み。
+- 所有Float32 Arrayのnative_rmsに列毎@simd平方和/scale/outputを追加し、native_residual_rmsでは残差保存と平方和を融合するJEFF_CPU_RMS_LOOP試作を評価。明示fastmathなし、両出力はfresh配列、入力不変、GPU dispatch不変更。
+- 81追加checks（幅1/7/128、tokens0/1/9、centered/noncentered、Array3、±0/NaN/Inf/floatmax/subnormal、shape拒否）と既存activation/native/所有テスト、全test suiteがexit0。JET No errors detected。Profile/Allocs取得、warm292.899ms/113,242,240heap bytes/GC0（profile-rms-loop.log）。
+- real0.8B parcel/current flags/Julia8/OpenBLAS1、30samples試作296.982ms/p95322.099ms/113,242,240bytes/11,531allocs/maxerror1.2398e-5（rms-loop.json）。直後の同試作flagoff control30samples298.307ms/p95315.610ms/113,556,368bytes/11,979allocs/maxerror1.1444e-5（rms-loop-control.json）。元5f2d0e9 repeat296.796ms。0.4%差は十分な全体速度改善の証拠と扱わず、不採用。flagoffにもENV判定分の割当が加わるためproduction methods/追加tests/benchmark flagを除去し、worktreeを5f2d0e9のsourceに戻した。
+- 試作の再現patchはignored artifacts/cpu-tuning/rms-loop-trial.patch、他ログrms-loop-validation.log/rms-loop-checkpoint-tests.log。割当0のための変更は追わず、次はworkspace後のphaseを再測定し、投影/MLP down/コピーなし融合を優先する。2倍目標は未達、active。
+- 5f2d0e9の実workspace経路でtime_cpu_phasesを5warm passes実行、exit0/各pass参照guard通過（phases-delta-projection-workspace.jsonl）。instrumented total287.178〜298.388ms、stage合計の中央値preRMS1.420958/attention163.613085/postRMS3.310502/gate-up75.454604/activation7.604631/down32.651782/residual0.834017ms。Delta attention135.716339/full27.690589ms。異なるphase中央値を足してforward中央値とは扱わない。RMSよりGEMMが大きい。次はdown projectionをBLAS beta=1で所有residualに直接累積し、down中間配列と別add走査を省く候補を検証する。
+
+## CPU MLP down / residual accumulation checkpoint
+
+- JEFF_CPU_MLP_RESIDUAL_FUSION=1（既定off）で層が所有するresidualへdown projectionをBLAS beta=1で直接累積し、down中間配列と別add走査を省く。parallel projectionはworkerごとにdisjoint行領域、aliasは先に独立productを作ってから累積する。既存beta=0経路は従来の3引数mul!を保持。
+- 同Intel i9-9900K/Float32/real0.8B/parcel B1L256active101/Julia8/OpenBLAS1/current flags、30samples294.338ms/p95325.456ms、独立30samples293.934ms/p95313.750ms、103,750,032heap bytes/11,823allocs/maxerror1.2398e-5。matched flagoff30samples297.079ms/p95322.429ms/113,554,448bytes/11,919allocs。速度差約1%、heap約9.8MB減、普遍的速度改善とは主張しない。固定495.254ms基準比約1.685倍、247.627ms目標未達。
+- 追加46checksと既存activation126/block18496/native597checksが8worker/1worker両方exit0。projectionのinput/weight alias、parallel/serial、tokens1/9/65、MLP workspaceなし/あり、入力保持を検証。全test suite exit0、JET core+portable extension No errors detected、Profile/Allocs5%取得。warm285.602ms/同heap/GC0。
+- mlp-residual-fusion{,-repeat,-control}.json、mlp-residual-fusion-{validation,single-worker,checkpoint-tests}.log、profile-mlp-residual-fusion.log。phase toolもbeta=1の経路を測定するよう更新。リモート9ded04aのM4 docs/journalと手元の記録は両方保持してff pull済み、実装差はなく計測条件を混同しない。

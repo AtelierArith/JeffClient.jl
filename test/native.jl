@@ -302,3 +302,53 @@ end
         end
     end
 end
+@testset "CPU projection accumulation and MLP residual ownership" begin
+    old_threads = JeffClient.BLAS.get_num_threads()
+    try
+        JeffClient.BLAS.set_num_threads(1)
+        for parallel in ("0", "1")
+            withenv("JEFF_CPU_PARALLEL_PROJECTIONS" => parallel) do
+                for n in (1, 9, 65)
+                    weight = reshape(sin.(Float32.(1:(512*512))), 512, 512) ./ 512
+                    x = reshape(cos.(Float32.(1:(512*n))), 512, n)
+                    residual = sin.(x)
+                    saved_x, saved_w = copy(x), copy(weight)
+                    expected = residual .+ transpose(weight) * x
+                    @test JeffClient.cpu_projection!(residual, weight, x, 1.0f0) ===
+                          residual
+                    @test residual ≈ expected atol=2e-5 rtol=2e-5
+                    @test x == saved_x
+                    @test weight == saved_w
+                end
+                weight = reshape(sin.(Float32.(1:64)), 8, 8)
+                x = copy(weight)
+                expected = x .+ transpose(weight) * x
+                @test JeffClient.cpu_projection!(x, weight, x, 1.0f0) ≈ expected
+                x = copy(weight)
+                expected = weight .+ transpose(weight) * x
+                @test JeffClient.cpu_projection!(weight, weight, x, 1.0f0) ≈ expected
+            end
+        end
+        backend = NativeBackend(joinpath(@__DIR__, "fixtures", "native"))
+        mlp = first(backend.layers).mlp
+        for n in (1, 9, 65), workspace in (false, true)
+            x = reshape(
+                sin.(Float32.(1:(backend.config.hidden*n))),
+                backend.config.hidden,
+                n,
+            )
+            residual = cos.(x)
+            saved = copy(x)
+            expected = residual .+ JeffClient.native_mlp(mlp, x)
+            width = size(mlp.gate, 2)
+            buffers = workspace ? (fill(NaN32, width, n), fill(NaN32, width, n)) : nothing
+            withenv("JEFF_CPU_MLP_RESIDUAL_FUSION" => "1") do
+                @test JeffClient.cpu_mlp_add!(residual, mlp, x, buffers) === residual
+                @test residual ≈ expected atol=2e-5 rtol=2e-5
+                @test x == saved
+            end
+        end
+    finally
+        JeffClient.BLAS.set_num_threads(old_threads)
+    end
+end
