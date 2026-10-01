@@ -1,0 +1,57 @@
+{
+  "cuda_cuarray_roundtrip": {
+    "error": "CUDA initialization failed: CUDA error (code 804, CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE)\nDriver log:\n  [14:49:34.561][133654697668928][CUDA][E] Returning 804 (CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE) from cuInit",
+    "status": "failed"
+  },
+  "cuda_device_count": {
+    "error": "CUDA error (code 3, CUDA_ERROR_NOT_INITIALIZED)",
+    "status": "failed"
+  },
+  "cuda_functional": {
+    "status": "passed",
+    "value": false
+  },
+  "cuda_functional_reason": {
+    "error": "CUDA initialization failed: CUDA error (code 804, CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE)\nDriver log:\n  [14:49:34.561][133654697668928][CUDA][E] Returning 804 (CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE) from cuInit",
+    "status": "failed"
+  },
+  "cuda_jl_version": "6.4.1",
+  "cuda_runtime_version": {
+    "status": "passed",
+    "value": "13.4.0"
+  },
+  "cudnn_import": {
+    "status": "passed",
+    "value": "6.4.1"
+  },
+  "gpu_models": [
+    "GeForce RTX 3060",
+    "GeForce RTX 3060"
+  ],
+  "julia_version": "1.13.1",
+  "kernel_driver": "580.173.02",
+  "native_cuda_constructor": {
+    "error": "ArgumentError: Unsupported native device Val{:cuda}(); import the required GPU package first.",
+    "status": "failed"
+  },
+  "onnx_cpu_fixture": {
+    "status": "passed",
+    "value": "(2, 3)"
+  },
+  "onnx_cuda_fixture": {
+    "error": "The :cuda execution provider requires CUDA to be functional. See `CUDA.functional`.\n",
+    "status": "failed"
+  },
+  "onnxruntime_jl_version": "1.4.0",
+  "real_model_cuda_forward_run": false,
+  "source_commit": "fddc576013bf1f6971bc7ffdcd901c7d3c44ccab",
+  "userspace_driver": "580.178.04",
+  "measurement_date": "2026-10-01",
+  "machine": "x86_64-linux-gnu",
+  "root_dependencies_modified": false,
+  "isolated_environment": "artifacts/cuda-validation/env",
+  "onnxruntime_supported_cuda_range": "12.0 <= runtime < 13.0",
+  "runtime_compatible_with_onnxruntime": false,
+  "native_cuda_extension_present": false,
+  "note": "CUDA.functional() returned false, CuArray operation failed with CUDA error 804 and the ONNX CUDA session could not be constructed. ONNX CPU fixture passed. A real 0.8B CUDA forward was not run. NativeBackend rejects device=:cuda even with CUDA imported."
+}
