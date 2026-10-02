@@ -129,3 +129,22 @@ the explicitly adapted MLX results. See `--help` for reproducible output paths.
 See [Profiling and measurements](profiling.md) for the new Apple M4 and Linux CPU results,
 Python comparison, thread configurations, Octavian experiment and historical
 Intel CPU trials. Raw benchmark JSON is linked beside each measurement.
+
+## NVIDIA CUDA measurements
+
+Jeff-Qwen3.5-0.8B on an RTX 3060, Float32, batch 1, input length 256
+(101 active tokens), 30 measured forwards after five warm-ups:
+
+| Backend | Median | p95 |
+| --- | ---: | ---: |
+| ONNX Runtime CUDA | 178.59 ms | 181.14 ms |
+| NativeBackend CUDA, full sequence | 70.43 ms | 71.10 ms |
+| NativeBackend CUDA, leading padding trimmed | 34.50 ms | 35.04 ms |
+
+Full-sequence native inference is 2.54 times faster than this ONNX export.
+The trimmed option computes 101 tokens, so it is a separate workload. Timing
+includes input upload, readout, CPU score return and synchronization; loading,
+compilation and tokenization are excluded. Native inference allocates no GPU
+buffers after warm-up on this input, but still allocates about 176 KB on the
+Julia heap per full forward. See [profiling](profiling.md#Native-CUDA-measurements)
+for raw results, validation, memory accounting and reproduction commands.

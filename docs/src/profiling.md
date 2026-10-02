@@ -405,9 +405,10 @@ include("tools/benchmark_original.jl")
 
 ### CUDA / ONNX Runtime verification
 
-Native Julia CUDA inference is not implemented: the native backend supports
-CPU and the optional Metal extension. ONNX Runtime has a CUDA provider path.
-On this host, CUDA.jl 6.4.1 reports `CUDA.functional() == false`, and a CuArray
+Native Julia CUDA inference is now available through the optional CUDA extension;
+see the native measurements below. The following paragraph records the earlier
+environment failure before the driver update.
+On 2026-10-01, CUDA.jl 6.4.1 reported `CUDA.functional() == false`, and a CuArray
 round trip fails with CUDA error 804. The loaded NVIDIA driver (580.173.02)
 and userspace libraries (580.178.04) differ. ONNX Runtime's tiny CPU fixture
 passes, but CUDA session construction fails; real-model GPU inference was not
@@ -415,6 +416,41 @@ measured. The selected CUDA runtime 13.4 is also outside ONNXRunTime.jl 1.4.0's
 CUDA 12.x range. This is a blocked environment check, not a GPU speed result.
 See [CUDA setup and verification](inference.md#CUDA-through-ONNX-Runtime) and
 [verification JSON](assets/benchmarks/cuda-2026-10-01-fddc576-linux.json).
+
+On 2026-10-02, NVIDIA driver 580.178.04 initialized successfully on the RTX 3060
+host. CUDA.jl 6.4.1 passed a synchronized CuArray round trip. With runtime 13.4,
+ONNXRunTime.jl 1.4.0 still rejected session construction due to its CUDA 12.x
+requirement. Selecting runtime 12.8 in the isolated validation environment and
+restarting Julia resolved this. Both the repository's identity fixture and
+ONNXRunTime's MatMul fixture passed through `ONNXBackend(...;
+execution_provider=:cuda)`. The non-square Float32 matrix product (2×3 times
+3×4) matched Julia, and `decide` returned the expected choices for both rows.
+Verbose ONNX Runtime logging confirmed all nodes (one MatMul node) were placed
+on `CUDAExecutionProvider`. Local logs are retained under ignored
+`artifacts/cuda-validation/onnx-2026-10-02.log` and
+`artifacts/cuda-validation/onnx-provider-2026-10-02.log`.
+
+The full `mstrasser/Jeff-Qwen3.5-0.8B` checkpoint at revision
+`0f212b3e72acb4dde3f7da61e925d6ab7f819990` was subsequently exported using
+`tools/_onnx_export.py` through PythonCall. Fixed-shape Float32 export used
+batch 1 and sequence length 256. The parcel prompt has 101 active tokens and
+155 left-padding tokens. All 255 logits passed comparison against independent
+PyTorch outputs for three prompts (`atol=2e-3`, `rtol=2e-3`); maximum absolute
+CUDA errors were 0.003813, 0.002560 and 0.001807. The CPU export validation's
+maximum absolute error was 6.68e-6. ORT assigned 19,921 nodes to CUDA and 24
+to CPU and inserted 52 copy nodes; this is mixed provider execution.
+
+With verbose logging disabled, five warmups followed by 30 measurements gave
+**178.591 ms median / 181.143 ms p95** on NVIDIA GeForce RTX 3060,
+CUDA.jl 6.4.1, runtime 12.8 and ONNXRunTime.jl 1.4.0 (ORT 1.20.1).
+Timing includes prepared CPU input transfer, inference, readout, CPU logits
+return and synchronization. It excludes model loading (104.8 seconds in this
+run), compilation, tokenization and `decide` answer calibration. No CPU affinity
+was imposed. This measures the current fixed-shape exported graph; it is not
+an optimized CUDA kernel benchmark. See the
+[raw measurement JSON](assets/benchmarks/jeff-onnx-cuda-2026-10-02.json).
+Export, validation and provider-placement logs and the measurement script are
+retained under ignored `artifacts/cuda-validation/`.
 
 
 ## Historical Intel CPU measurements
@@ -638,3 +674,74 @@ factory's benchmark completed; its full diagnostic revalidation was interrupted
 when work stopped. The trial is absent from the verified implementation.
 
 </details>
+
+### Native CUDA measurements
+
+On 2026-10-02, the optional CUDA extension loaded the original safetensors
+checkpoint `mstrasser/Jeff-Qwen3.5-0.8B` at revision
+`0f212b3e72acb4dde3f7da61e925d6ab7f819990`, without ONNX Runtime.
+Hardware/software: RTX 3060, Julia 1.13.1, CUDA.jl 6.4.1, CUDA runtime 12.8,
+cuBLAS 12.8.4, Float32 and the default CUDA math mode.
+
+Thirty forwards after five warm-ups, batch 1 / length 256 / 101 active tokens,
+measured median **70.4345 ms**, p95 **71.1010 ms**. This includes CPU input
+upload, all layers, readout, CPU logits return and completion; model loading,
+compilation, tokenization and answer calibration are excluded. All 255 output
+columns of three independent PyTorch reference cases were validated, maximum
+absolute error 8.5831e-6. [Full results](assets/benchmarks/jeff-native-cuda-2026-10-02.json).
+
+`JEFF_CUDA_TRIM_PADDING=1` skips leading masked positions, retaining interior
+holes. The same input then computes 101 tokens: median **34.5000 ms**, p95
+**35.0371 ms**, with the same validation protocol. This shorter workload is
+reported separately. [Trimmed results](assets/benchmarks/jeff-native-cuda-trimmed-2026-10-02.json).
+
+Every measured native forward allocated zero GPU buffers/bytes. Julia heap
+allocation was typically 176,064 bytes full / 172,432 bytes trimmed; reported
+GC time was zero in these samples. Reused workspace payload was 79,764,484
+bytes full / 30,971,724 bytes trimmed, excluding model weights. These are
+separate from CUDA pool retention: the full benchmark process reported
+4.099 GiB active / 4.125 GiB reserved, including model/loading allocations.
+Zero warm GPU allocation does not mean zero Julia heap allocation.
+
+The initial generic CUDA implementation took about 1,014 ms and allocated
+46.7 MB on the Julia heap per forward. Profile/Profile.Allocs identified
+per-head/chunk arrays and repeated GEMMs. The extension uses recurrent delta
+kernels, batched full attention, packed projections, fused normalization and
+activation, cached cuBLAS coefficients and model-owned scratch. Scratch is
+reused between layers with hidden-state ping-pong buffers and serialized
+forwards; completion is awaited on success and exceptions. Multi-row delta
+and launch/register configuration trials did not improve timings and were
+not adopted.
+
+`CUDA.@profile` on the final full forward captured 73.66 ms: GPU busy
+68.55 ms, primary SGEMM 32.52 ms and delta recurrence 28.44 ms. This instrumented
+trace is diagnostic, separate from the latency samples. In scripts, explicitly
+`show(stdout, MIME"text/plain"(), profile_result)` to print CUDA.jl 6.4's report.
+Host CUDA synchronization time overlaps device execution and must not be
+added to kernel time. Profile logs remain under ignored `artifacts/cuda-validation/`.
+
+GPU 0 performed benchmarks; GPU 1 performed correctness/type checks. The
+optional tiny CUDA suite passed 184 checks, including mask/length changes,
+GC reuse, retained CPU results, concurrent calls, failure recovery and device
+restoration. Fifteen real-model reference cases passed 150 checks across both
+trim settings, including lengths 1–512, multiple rows and interior mask holes.
+The full CPU suite passed. Final `@code_warntype`/JET checks returned concrete
+types with no optimization errors for logits and both attention layer types.
+AllocCheck can flag host allocation paths, but cold scratch creation and CUDA
+runtime paths produce findings; use warmed allocation measurements alongside
+it rather than inferring GPU allocation counts from LLVM analysis.
+
+Run these tools from an application environment containing CUDA and JeffClient:
+
+```sh
+julia --project=YOUR_ENV tools/benchmark_native_cuda.jl CHECKPOINT REFERENCE_JSON result.json 30 0
+JEFF_CUDA_TRIM_PADDING=1 julia --project=YOUR_ENV tools/benchmark_native_cuda.jl CHECKPOINT REFERENCE_JSON trimmed.json 30 0
+julia --project=YOUR_ENV tools/verify_cuda.jl CHECKPOINT REFERENCE_JSON 1
+julia --project=YOUR_ENV -e 'using CUDA; CUDA.device!(1); include("test/cuda.jl")'
+```
+
+The benchmark expects the reference JSON format produced by the project's
+reference/export tools. `tools/build_cuda_reference.jl` regenerates the tiny
+CUDA reference through PythonCall. cuBLAS coefficient reuse follows CUDA.jl
+6.4.1's `gemmEx!` implementation; this internal API optimization was tested
+with that version. Other CUDA 6 releases require revalidation.
