@@ -14,6 +14,7 @@ IDs and masks; tokenization is not part of this API. Only float32 inference,
 default partial RoPE, and bias-free projections are currently supported.
 
 Use `device=:metal` after importing Metal for Apple GPU execution.
+Use `device=:cuda` after importing CUDA for NVIDIA GPU execution.
 CPU inference automatically selects its platform policy and skips leading
 zero-mask positions without removing active tokens or interior mask holes.
 """
@@ -51,6 +52,7 @@ end
 native_batch_logits(backend, ids, mask) = nothing
 native_mlp_weights(device, gate, up, down) = (; gate, up, down)
 native_conv_weights(device, weight) = weight
+native_attention_weights(device, attention) = attention
 native_gather(embedding, ids) = embedding[:, on_native_device(embedding, Int32.(ids .+ 1))]
 native_gather(embedding::Matrix, ids) = embedding[:, ids .+ 1]
 
@@ -145,6 +147,7 @@ function NativeBackend(checkpoint::AbstractString; device::Symbol = :cpu)
         else
             throw(ArgumentError("Unsupported layer type $kind."))
         end
+        attention = native_attention_weights(Val(device), attention)
         mlp = native_mlp_weights(
             Val(device),
             get("mlp.gate_proj.weight"),

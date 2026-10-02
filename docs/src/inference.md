@@ -115,13 +115,37 @@ constructing `ONNXBackend(...; execution_provider=:cuda)`. Compatibility depends
 on ONNXRunTime's CUDA runtime requirements and the graph's operators. Other
 providers are not currently exposed by this package.
 
-Native Julia CUDA inference is not implemented: `NativeBackend(...; device=:cuda)`
-rejects the device even after importing CUDA. Native GPU execution uses Metal.
-ONNXRunTime.jl 1.4.0 requires a functional CUDA 12.x runtime. The Linux GPU
-verification was blocked by driver initialization; results and environment
-conditions are recorded in [Profiling and measurements](profiling.md#CUDA-/-ONNX-Runtime-verification).
+Native Julia CUDA inference is available separately through
+`NativeBackend(...; device=:cuda)` after importing CUDA. It loads safetensors
+directly and does not execute an ONNX graph.
+ONNXRunTime.jl 1.4.0 requires a functional CUDA 12.x runtime. If CUDA selects
+13.x, run `CUDA.set_runtime_version!(v"12.8")` in your application environment
+and restart Julia. On 2026-10-02, Linux CUDA inference passed with CUDA.jl 6.4.1
+and runtime 12.8: a MatMul fixture ran on the CUDA provider and matched Julia's
+matrix product, including answer generation through `decide`. The full Jeff
+0.8B checkpoint also passed three reference cases and ran in a median 178.6 ms
+on RTX 3060 (Float32, batch 1, sequence length 256). Results and environment conditions
+are recorded in [Profiling and measurements](profiling.md#CUDA-/-ONNX-Runtime-verification).
 
 ## Native Julia model and Metal
+
+For NVIDIA GPUs, install CUDA in your application environment and use:
+
+```julia
+using JeffClient, CUDA
+CUDA.allowscalar(false)
+CUDA.device!(0)
+backend = NativeBackend(checkpoint; device=:cuda)
+scores = logits(backend, inputs)
+```
+
+This optional extension uses Julia CUDA kernels and cuBLAS, with Float32
+weights and outputs. It processes the complete prepared sequence, including
+left padding. Scratch buffers belong to each model and are reused only after
+its CUDA stream completes; calls sharing a model are serialized. Returned
+scores are owned CPU arrays. A model remains usable if the caller changes
+the active CUDA device; the forward temporarily selects the model's device.
+Native CUDA does not require cuDNN or an ONNX export.
 
 The text-only Qwen3.5 forward pass loads source safetensors directly: embeddings,
 partial RoPE, grouped full attention, Gated DeltaNet, RMS normalization, SiLU MLP,
@@ -188,3 +212,8 @@ Current limits: float32 text inference, default partial RoPE, bias-free
 projections, and row-wise batch execution by default (experimental joint Metal batching is available). Tokenization, image
 inputs, generation/KV caching, and training are pending. Performance tuning is ongoing.
 Total device memory usage has not been measured.
+
+Set `ENV["JEFF_CUDA_TRIM_PADDING"] = "1"` to skip leading masked tokens.
+This option preserves interior mask holes and is disabled by default so full
+sequence benchmarks remain comparable. See [performance](performance.md) for
+full-sequence and trimmed measurements.
