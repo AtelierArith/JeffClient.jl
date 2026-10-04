@@ -1,5 +1,14 @@
 # JeffClient implementation plan
 
+> Architecture note (2026-10-04). The shared infrastructure now lives in
+> [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl), a
+> Git submodule under `extern/QwenDecisionCore.jl`: the backbone forward pass,
+> the safetensors reader, the Hugging Face resolver, the CPU policy and the
+> accelerator extensions. JeffClient keeps only what is Jeff-specific — the
+> `decision_config.json` / `readout.safetensors` bundle, the linear readout and
+> the ONNX export backend — mirroring KevClient.jl. The programme below records
+> how that point was reached; the accelerator extensions are now the core's.
+
 ## 1. Prepared-tensor inference — current implementation
 
 - Load an ONNX model through the registered `ONNXRunTime` package.

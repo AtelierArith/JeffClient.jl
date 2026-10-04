@@ -147,10 +147,13 @@ scores are owned CPU arrays. A model remains usable if the caller changes
 the active CUDA device; the forward temporarily selects the model's device.
 Native CUDA does not require cuDNN or an ONNX export.
 
-The text-only Qwen3.5 forward pass loads source safetensors directly: embeddings,
-partial RoPE, grouped full attention, Gated DeltaNet, RMS normalization, SiLU MLP,
-and Jeff's readout are implemented in Julia. No ONNX export or Python is needed
-for this inference path.
+The text-only Qwen3.5 forward pass lives in
+[QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl)
+(`extern/QwenDecisionCore.jl`) and loads source safetensors directly: embeddings,
+partial RoPE, grouped full attention, Gated DeltaNet, RMS normalization and the
+SiLU MLP are implemented in Julia. JeffClient adds the trained readout and reads
+`decision_config.json`. No ONNX export or Python is needed for this inference
+path.
 
 ```julia
 using JeffClient
