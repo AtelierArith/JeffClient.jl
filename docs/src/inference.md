@@ -213,7 +213,7 @@ projections, and row-wise batch execution by default (experimental joint Metal b
 inputs, generation/KV caching, and training are pending. Performance tuning is ongoing.
 Total device memory usage has not been measured.
 
-Set `ENV["JEFF_CUDA_TRIM_PADDING"] = "1"` to skip leading masked tokens.
+Set `ENV["QDC_CUDA_TRIM_PADDING"] = "1"` to skip leading masked tokens.
 This option preserves interior mask holes and is disabled by default so full
 sequence benchmarks remain comparable. See [performance](performance.md) for
 full-sequence and trimmed measurements.

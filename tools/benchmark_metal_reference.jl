@@ -6,12 +6,12 @@ import Metal
 Metal.functional() || error("A functional Apple GPU is required.")
 Metal.allowscalar(false)
 for flag in (
-    "JEFF_METAL_BATCHED",
-    "JEFF_METAL_WORKSPACE",
-    "JEFF_METAL_PACKED_MLP",
-    "JEFF_METAL_TRIM_PADDING",
-    "JEFF_METAL_SHAPE_WORKSPACES",
-    "JEFF_METAL_FUSED_DELTA_MASK",
+    "QDC_METAL_BATCHED",
+    "QDC_METAL_WORKSPACE",
+    "QDC_METAL_PACKED_MLP",
+    "QDC_METAL_TRIM_PADDING",
+    "QDC_METAL_SHAPE_WORKSPACES",
+    "QDC_METAL_FUSED_DELTA_MASK",
 )
     ENV[flag] = "0"
 end

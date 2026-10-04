@@ -163,16 +163,16 @@ function run_benchmark(args, profile, warmups = 2)
             ]
         end
         if device == :metal
-            result["metal_batched_enabled"] = get(ENV, "JEFF_METAL_BATCHED", "0") == "1"
-            result["metal_workspace_enabled"] = get(ENV, "JEFF_METAL_WORKSPACE", "0") == "1"
+            result["metal_batched_enabled"] = get(ENV, "QDC_METAL_BATCHED", "0") == "1"
+            result["metal_workspace_enabled"] = get(ENV, "QDC_METAL_WORKSPACE", "0") == "1"
             result["metal_packed_mlp_enabled"] =
-                get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1"
+                get(ENV, "QDC_METAL_PACKED_MLP", "0") == "1"
             result["metal_trim_padding_enabled"] =
-                get(ENV, "JEFF_METAL_TRIM_PADDING", "0") == "1"
+                get(ENV, "QDC_METAL_TRIM_PADDING", "0") == "1"
             result["metal_fused_delta_mask_enabled"] =
-                get(ENV, "JEFF_METAL_FUSED_DELTA_MASK", "0") == "1"
+                get(ENV, "QDC_METAL_FUSED_DELTA_MASK", "0") == "1"
             result["metal_shape_workspaces_enabled"] =
-                get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", "0") == "1"
+                get(ENV, "QDC_METAL_SHAPE_WORKSPACES", "0") == "1"
             result["metal_computed_sequence_lengths"] = [
                 size(inputs["input_ids"], 2) - QwenDecisionCore.native_sequence_start(
                     backend.backbone.embedding,

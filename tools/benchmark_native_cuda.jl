@@ -66,7 +66,7 @@ function main()
         "math_precision"=>string(CUDA.math_precision()),
         "batch"=>size(inputs["input_ids"], 1),
         "sequence_length"=>size(inputs["input_ids"], 2),
-        "trim_padding"=>get(ENV, "JEFF_CUDA_TRIM_PADDING", "0") == "1",
+        "trim_padding"=>get(ENV, "QDC_CUDA_TRIM_PADDING", "0") == "1",
         "computed_sequence_lengths"=>[
             size(inputs["input_ids"], 2)-QwenDecisionCore.native_sequence_start(
                 backend.backbone.embedding,

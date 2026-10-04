@@ -14,7 +14,7 @@ function main()
     matrix(rows, T) = permutedims(hcat([T.(row) for row in rows]...))
     @testset "Real CUDA checkpoint shape/mask/GC verification" begin
         for trim in ("0", "1")
-            withenv("JEFF_CUDA_TRIM_PADDING"=>trim) do
+            withenv("QDC_CUDA_TRIM_PADDING"=>trim) do
                 for case in cases
                     inputs =
                         Dict(name=>matrix(rows, Int64) for (name, rows) in case["inputs"])

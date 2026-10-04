@@ -25,18 +25,18 @@ end
 
 function verify_batched_forward_workspace(extension)
     flags = (
-        "JEFF_METAL_BATCHED",
-        "JEFF_METAL_WORKSPACE",
-        "JEFF_METAL_SHAPE_WORKSPACES",
-        "JEFF_METAL_TRIM_PADDING",
+        "QDC_METAL_BATCHED",
+        "QDC_METAL_WORKSPACE",
+        "QDC_METAL_SHAPE_WORKSPACES",
+        "QDC_METAL_TRIM_PADDING",
     )
     previous = Dict(flag => get(ENV, flag, nothing) for flag in flags)
     try
         extension.clear_forward_workspace!()
-        ENV["JEFF_METAL_BATCHED"] = "1"
-        ENV["JEFF_METAL_WORKSPACE"] = "1"
-        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
-        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
+        ENV["QDC_METAL_BATCHED"] = "1"
+        ENV["QDC_METAL_WORKSPACE"] = "1"
+        ENV["QDC_METAL_SHAPE_WORKSPACES"] = "1"
+        ENV["QDC_METAL_TRIM_PADDING"] = "0"
         fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
         cpu, gpu =
             NativeBackend(fixture; device = :cpu), NativeBackend(fixture; device = :metal)
@@ -345,18 +345,18 @@ end
 
 function verify_fused_delta_mask_workspace(extension)
     flags = (
-        "JEFF_METAL_WORKSPACE",
-        "JEFF_METAL_SHAPE_WORKSPACES",
-        "JEFF_METAL_TRIM_PADDING",
-        "JEFF_METAL_FUSED_DELTA_MASK",
+        "QDC_METAL_WORKSPACE",
+        "QDC_METAL_SHAPE_WORKSPACES",
+        "QDC_METAL_TRIM_PADDING",
+        "QDC_METAL_FUSED_DELTA_MASK",
     )
     previous = Dict(flag => get(ENV, flag, nothing) for flag in flags)
     try
         extension.clear_forward_workspace!()
-        ENV["JEFF_METAL_WORKSPACE"] = "1"
-        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "0"
-        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
-        ENV["JEFF_METAL_FUSED_DELTA_MASK"] = "1"
+        ENV["QDC_METAL_WORKSPACE"] = "1"
+        ENV["QDC_METAL_SHAPE_WORKSPACES"] = "0"
+        ENV["QDC_METAL_TRIM_PADDING"] = "0"
+        ENV["QDC_METAL_FUSED_DELTA_MASK"] = "1"
         fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
         cpu = NativeBackend(fixture; device = :cpu)
         gpu = NativeBackend(fixture; device = :metal)
@@ -428,11 +428,11 @@ function main()
         return
     end
     isempty(ARGS) || error("Usage: verify_metal_primitives.jl [batch]")
-    previous_trim = get(ENV, "JEFF_METAL_TRIM_PADDING", nothing)
+    previous_trim = get(ENV, "QDC_METAL_TRIM_PADDING", nothing)
     try
         reference = Metal.MtlArray(zeros(Float32, 1, 1))
         masks = [0 0 1 0 1; 1 0 1 0 1; 0 0 0 0 1; 1 1 1 1 1]
-        ENV["JEFF_METAL_TRIM_PADDING"] = "1"
+        ENV["QDC_METAL_TRIM_PADDING"] = "1"
         for (row, start) in enumerate((3, 1, 5, 1))
             QwenDecisionCore.native_sequence_start(reference, masks, row) == start ||
                 error("Leading padding start mismatch.")
@@ -441,16 +441,16 @@ function main()
             end
             cpu_start == 1 || error("Metal trimming flag changed the CPU policy.")
         end
-        ENV["JEFF_METAL_TRIM_PADDING"] = "0"
+        ENV["QDC_METAL_TRIM_PADDING"] = "0"
         all(
             QwenDecisionCore.native_sequence_start(reference, masks, row) == 1 for
             row in axes(masks, 1)
         ) || error("Disabled trimming changed sequence start.")
     finally
         if previous_trim === nothing
-            delete!(ENV, "JEFF_METAL_TRIM_PADDING")
+            delete!(ENV, "QDC_METAL_TRIM_PADDING")
         else
-            ENV["JEFF_METAL_TRIM_PADDING"] = previous_trim
+            ENV["QDC_METAL_TRIM_PADDING"] = previous_trim
         end
     end
     println("Validated leading padding selection, interior masks, and disabled trimming.")
@@ -618,9 +618,9 @@ function main()
     println(
         "Validated fused delta beta/decay for head counts, lengths, and extreme inputs.",
     )
-    previous_workspace_setting = get(ENV, "JEFF_METAL_WORKSPACE", nothing)
-    previous_shape_setting = get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", nothing)
-    ENV["JEFF_METAL_WORKSPACE"] = "1"
+    previous_workspace_setting = get(ENV, "QDC_METAL_WORKSPACE", nothing)
+    previous_shape_setting = get(ENV, "QDC_METAL_SHAPE_WORKSPACES", nothing)
+    ENV["QDC_METAL_WORKSPACE"] = "1"
     try
         host_weight = reshape(sin.(Float32.(1:35)), 7, 5)
         weight = Metal.MtlArray(host_weight)
@@ -789,7 +789,7 @@ function main()
         isempty(workspace.slot_indices) &&
         isempty(workspace.feed_values) ||
             error("Packed workspace retains objects after clear.")
-        ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
+        ENV["QDC_METAL_SHAPE_WORKSPACES"] = "1"
         previous_shape_arrays = Dict{Int,Any}()
         previous_shape_data = Dict{Int,Any}()
         for sequence_length in (9, 1, 9, 1, 65)
@@ -869,14 +869,14 @@ function main()
         ) || error("Shape workspace retains objects after clear.")
     finally
         if previous_workspace_setting === nothing
-            delete!(ENV, "JEFF_METAL_WORKSPACE")
+            delete!(ENV, "QDC_METAL_WORKSPACE")
         else
-            ENV["JEFF_METAL_WORKSPACE"] = previous_workspace_setting
+            ENV["QDC_METAL_WORKSPACE"] = previous_workspace_setting
         end
         if previous_shape_setting === nothing
-            delete!(ENV, "JEFF_METAL_SHAPE_WORKSPACES")
+            delete!(ENV, "QDC_METAL_SHAPE_WORKSPACES")
         else
-            ENV["JEFF_METAL_SHAPE_WORKSPACES"] = previous_shape_setting
+            ENV["QDC_METAL_SHAPE_WORKSPACES"] = previous_shape_setting
         end
     end
     println("Validated workspace arrays/result Vectors across length changes and GC.")

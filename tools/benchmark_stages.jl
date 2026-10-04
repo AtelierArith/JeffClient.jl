@@ -122,8 +122,8 @@ function delta_recurrent_stage(
 end
 
 function main()
-    get(ENV, "JEFF_METAL_PACKED_MLP", "0") == "1" &&
-        error("Stage comparison needs unpacked weights; use JEFF_METAL_PACKED_MLP=0.")
+    get(ENV, "QDC_METAL_PACKED_MLP", "0") == "1" &&
+        error("Stage comparison needs unpacked weights; use QDC_METAL_PACKED_MLP=0.")
     length(ARGS) in (2, 3) || error(
         "Usage: julia --project=tools tools/benchmark_stages.jl CHECKPOINT REFERENCE_JSON [OUTPUT_JSON]",
     )

@@ -690,7 +690,7 @@ compilation, tokenization and answer calibration are excluded. All 255 output
 columns of three independent PyTorch reference cases were validated, maximum
 absolute error 8.5831e-6. [Full results](assets/benchmarks/jeff-native-cuda-2026-10-02.json).
 
-`JEFF_CUDA_TRIM_PADDING=1` skips leading masked positions, retaining interior
+`QDC_CUDA_TRIM_PADDING=1` skips leading masked positions, retaining interior
 holes. The same input then computes 101 tokens: median **34.5000 ms**, p95
 **35.0371 ms**, with the same validation protocol. This shorter workload is
 reported separately. [Trimmed results](assets/benchmarks/jeff-native-cuda-trimmed-2026-10-02.json).
@@ -735,7 +735,7 @@ Run these tools from an application environment containing CUDA and JeffClient:
 
 ```sh
 julia --project=YOUR_ENV tools/benchmark_native_cuda.jl CHECKPOINT REFERENCE_JSON result.json 30 0
-JEFF_CUDA_TRIM_PADDING=1 julia --project=YOUR_ENV tools/benchmark_native_cuda.jl CHECKPOINT REFERENCE_JSON trimmed.json 30 0
+QDC_CUDA_TRIM_PADDING=1 julia --project=YOUR_ENV tools/benchmark_native_cuda.jl CHECKPOINT REFERENCE_JSON trimmed.json 30 0
 julia --project=YOUR_ENV tools/verify_cuda.jl CHECKPOINT REFERENCE_JSON 1
 julia --project=YOUR_ENV -e 'using CUDA; CUDA.device!(1); include("test/cuda.jl")'
 ```

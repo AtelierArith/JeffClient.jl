@@ -47,7 +47,7 @@ end
         masks = inputs["attention_mask"]
         for row in axes(masks, 1)
             expected_start =
-                get(ENV, "JEFF_CUDA_TRIM_PADDING", "0") == "1" ?
+                get(ENV, "QDC_CUDA_TRIM_PADDING", "0") == "1" ?
                 findfirst(==(1), view(masks, row, :)) : 1
             @test QwenDecisionCore.native_sequence_start(
                 backend.backbone.embedding,

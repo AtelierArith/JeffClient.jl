@@ -46,12 +46,12 @@ function main()
     inputs = Dict(name => rows_to_matrix(rows, Int64) for (name, rows) in sample["inputs"])
     println("Reference case: ", index, "; input shape: ", size(inputs["input_ids"]))
     for flag in (
-        "JEFF_METAL_WORKSPACE",
-        "JEFF_METAL_PACKED_MLP",
-        "JEFF_METAL_TRIM_PADDING",
-        "JEFF_METAL_SHAPE_WORKSPACES",
-        "JEFF_METAL_FUSED_DELTA_MASK",
-        "JEFF_METAL_BATCHED",
+        "QDC_METAL_WORKSPACE",
+        "QDC_METAL_PACKED_MLP",
+        "QDC_METAL_TRIM_PADDING",
+        "QDC_METAL_SHAPE_WORKSPACES",
+        "QDC_METAL_FUSED_DELTA_MASK",
+        "QDC_METAL_BATCHED",
     )
         println(flag, "=", get(ENV, flag, "0"))
     end
