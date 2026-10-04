@@ -100,6 +100,13 @@ parallel kernels:
 julia --threads=8 --project=tools examples/native_inference.jl
 ```
 
+Multiple Julia threads are worth it: they enable the fused task-parallel kernels
+and, when `Threads.nthreads() == 1`, `initialize_cpu!` sets BLAS to the
+physical-core count instead, which is much slower for this hybrid model.
+Measured on an Intel i9-9900K (8 physical cores), a 0.8B forward took about
+128 / 120 / 199 ms at 8 / 16 / 64 tokens with `--threads=8`, versus about
+842 / 893 / 716 ms with the default single-threaded Julia.
+
 This runs on CPU without Metal or MKL. See the performance page for conditions.
 
 ## Tests
