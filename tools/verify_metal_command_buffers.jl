@@ -1,6 +1,7 @@
 # Regression for MPSGraph internally committing a reused MPSCommandBuffer.
 # Run: julia --startup-file=no --project=tools tools/verify_metal_command_buffers.jl
 using JeffClient
+using QwenDecisionCore
 import Metal
 
 function verify_metal_command_buffers()
@@ -13,7 +14,7 @@ function verify_metal_command_buffers()
         b = Metal.ones(Float32, 4096, tokens)
         outputs = Metal.MtlMatrix{Float32}[]
         for _ = 1:16
-            c = JeffClient.native_matmul(a, b)
+            c = QwenDecisionCore.native_matmul(a, b)
             c .+= increment
             push!(outputs, c)
         end

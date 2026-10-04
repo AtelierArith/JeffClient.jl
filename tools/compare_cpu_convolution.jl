@@ -1,4 +1,5 @@
 using JeffClient, SIMD, LoopVectorization, BenchmarkTools, Test
+using QwenDecisionCore
 
 # Trial only: do not replace inference kernels based on a microbenchmark.
 function turbo_convolution!(output, input, coefficients)
@@ -21,12 +22,17 @@ function main()
     weight = transpose(coefficients)
     output = zeros(Float32, size(input))
     expected = copy(output)
-    JeffClient.cpu_convolution!(expected, input, weight)
+    QwenDecisionCore.cpu_convolution!(expected, input, weight)
     for method in (:scalar_simd, :explicit_simd, :turbo)
-        JeffClient.with_cpu_settings(:simd => (method == :explicit_simd ? "1" : "0")) do
+        QwenDecisionCore.with_cpu_settings(
+            :simd => (method == :explicit_simd ? "1" : "0"),
+        ) do
             operation =
                 method == :turbo ? () -> turbo_convolution!(output, input, coefficients) :
-                () -> (fill!(output, 0); JeffClient.cpu_convolution!(output, input, weight))
+                () -> (
+                    fill!(output, 0);
+                    QwenDecisionCore.cpu_convolution!(output, input, weight)
+                )
             operation()
             error = maximum(abs.(output .- expected))
             @test output ≈ expected atol=2.0f-6 rtol=2.0f-6

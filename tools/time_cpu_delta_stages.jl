@@ -1,14 +1,15 @@
 using JeffClient, LinearAlgebra, Statistics
+using QwenDecisionCore
 import JSON, LoopVectorization
 @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 
 function delta_stages(attention, x, mask, cfg, workspace)
     n = size(x, 2)
     masked = @timed x .* reshape(Float32.(mask), 1, :)
-    projection = @timed JeffClient.native_linear(attention.qkv, masked.value)
+    projection = @timed QwenDecisionCore.native_linear(attention.qkv, masked.value)
     convolution = @timed begin
         raw = zeros(Float32, size(projection.value))
-        JeffClient.cpu_convolution!(raw, projection.value, attention.conv)
+        QwenDecisionCore.cpu_convolution!(raw, projection.value, attention.conv)
         raw
     end
     raw = convolution.value
@@ -19,30 +20,31 @@ function delta_stages(attention, x, mask, cfg, workspace)
         high = count(x -> x >= 80.0f0, raw),
         tiny = count(x -> abs(x) <= 1.0f-12, raw),
     )
-    activation = @timed JeffClient.native_cpu_silu!(raw, projection.value)
+    activation = @timed QwenDecisionCore.native_cpu_silu!(raw, projection.value)
     prepared = @timed begin
         mixed = activation.value
         width = cfg.key_dim * cfg.key_heads
         q = reshape(copy(@view(mixed[1:width, :])), cfg.key_dim, cfg.key_heads, n)
         k = reshape(copy(@view(mixed[(width+1):2width, :])), cfg.key_dim, cfg.key_heads, n)
         v = reshape(@view(mixed[(2width+1):end, :]), cfg.value_dim, cfg.value_heads, n)
-        JeffClient.cpu_normalize_delta_heads!(q, sqrt(Float32(cfg.key_dim)))
-        JeffClient.cpu_normalize_delta_heads!(k, 1.0f0)
+        QwenDecisionCore.cpu_normalize_delta_heads!(q, sqrt(Float32(cfg.key_dim)))
+        QwenDecisionCore.cpu_normalize_delta_heads!(k, 1.0f0)
         (q, k, v)
     end
     gating = @timed begin
         z = reshape(
-            JeffClient.native_linear(attention.z, masked.value),
+            QwenDecisionCore.native_linear(attention.z, masked.value),
             cfg.value_dim,
             cfg.value_heads,
             n,
         )
-        beta = JeffClient.native_sigmoid.(
-            JeffClient.native_linear(attention.b, masked.value),
+        beta = QwenDecisionCore.native_sigmoid.(
+            QwenDecisionCore.native_linear(attention.b, masked.value),
         )
         decay =
-            attention.a_decay .* JeffClient.native_softplus.(
-                JeffClient.native_linear(attention.a, masked.value) .+ attention.dt_bias,
+            attention.a_decay .* QwenDecisionCore.native_softplus.(
+                QwenDecisionCore.native_linear(attention.a, masked.value) .+
+                attention.dt_bias,
             )
         (z, beta, decay)
     end
@@ -50,9 +52,9 @@ function delta_stages(attention, x, mask, cfg, workspace)
     z, beta, decay = gating.value
     out = Matrix{Float32}(undef, cfg.value_dim*cfg.value_heads, n)
     heads = @timed begin
-        workers = JeffClient.cpu_delta_workers(cfg)
+        workers = QwenDecisionCore.cpu_delta_workers(cfg)
         @sync for worker = 1:workers
-            Threads.@spawn JeffClient.cpu_delta_heads!(
+            Threads.@spawn QwenDecisionCore.cpu_delta_heads!(
                 worker:workers:cfg.value_heads,
                 out,
                 q,
@@ -69,21 +71,21 @@ function delta_stages(attention, x, mask, cfg, workspace)
             )
         end
     end
-    output = @timed JeffClient.native_linear(attention.out, out)
+    output = @timed QwenDecisionCore.native_linear(attention.out, out)
     stages = (masked, projection, convolution, activation, prepared, gating, heads, output)
     return output.value, [p.time*1000 for p in stages], [p.bytes for p in stages], domain
 end
 
 function pass(backend, ids, mask)
-    return JeffClient.cpu_projection_scope() do
-        cfg = backend.config
-        hidden = JeffClient.native_gather(backend.embedding, ids)
-        workspace = JeffClient.cpu_mlp_workspace(backend.layers, length(ids))
-        delta_workspace = JeffClient.cpu_delta_workspace(cfg, length(ids))
+    return QwenDecisionCore.cpu_projection_scope() do
+        cfg = backend.backbone.config
+        hidden = QwenDecisionCore.native_gather(backend.backbone.embedding, ids)
+        workspace = QwenDecisionCore.cpu_mlp_workspace(backend.backbone.layers, length(ids))
+        delta_workspace = QwenDecisionCore.cpu_delta_workspace(cfg, length(ids))
         records = []
-        for (index, layer) in enumerate(backend.layers)
-            final = index == length(backend.layers)
-            normalized = JeffClient.native_rms(hidden, layer.input_norm, cfg.eps)
+        for (index, layer) in enumerate(backend.backbone.layers)
+            final = index == length(backend.backbone.layers)
+            normalized = QwenDecisionCore.native_rms(hidden, layer.input_norm, cfg.eps)
             if layer.attention.kind == :delta
                 mixed, ms, bytes, domain =
                     delta_stages(layer.attention, normalized, mask, cfg, delta_workspace)
@@ -91,35 +93,40 @@ function pass(backend, ids, mask)
             else
                 mixed =
                     final ?
-                    JeffClient.cpu_final_full_attention(
+                    QwenDecisionCore.cpu_final_full_attention(
                         layer.attention,
                         normalized,
                         mask,
                         cfg,
-                    ) : JeffClient.full_attention(layer.attention, normalized, mask, cfg)
+                    ) :
+                    QwenDecisionCore.full_attention(layer.attention, normalized, mask, cfg)
             end
             residual, normalized = if final
                 residual = hidden[:, end:end] .+ mixed[:, end:end]
-                (residual, JeffClient.native_rms(residual, layer.post_norm, cfg.eps))
+                (residual, QwenDecisionCore.native_rms(residual, layer.post_norm, cfg.eps))
             else
-                JeffClient.native_residual_rms(hidden, mixed, layer.post_norm, cfg.eps)
+                QwenDecisionCore.native_residual_rms(hidden, mixed, layer.post_norm, cfg.eps)
             end
             buffers = final ? workspace.final : workspace.full
-            hidden = JeffClient.native_residual_add!(
+            hidden = QwenDecisionCore.native_residual_add!(
                 residual,
-                JeffClient.native_mlp(layer.mlp, normalized, buffers),
+                QwenDecisionCore.native_mlp(layer.mlp, normalized, buffers),
             )
         end
-        scores = JeffClient.native_linear(
+        scores = QwenDecisionCore.native_linear(
             backend.readout,
-            JeffClient.native_rms(hidden[:, end:end], backend.final_norm, cfg.eps),
+            QwenDecisionCore.native_rms(
+                hidden[:, end:end],
+                backend.backbone.final_norm,
+                cfg.eps,
+            ),
         )
         return scores, records
     end
 end
 
 function main()
-    JeffClient.cpu_setting(:delta_projection_workspace) && error(
+    QwenDecisionCore.cpu_setting(:delta_projection_workspace) && error(
         "This stage diagnostic requires projection workspace disabled; use time_cpu_phases.jl to profile the workspace path.",
     )
     length(ARGS) == 2 || error("Usage: time_cpu_delta_stages.jl MODEL REFERENCE")
@@ -158,6 +165,6 @@ function main()
         flush(stdout)
     end
 end
-JeffClient.with_cpu_settings(:delta_projection_workspace => false) do
+QwenDecisionCore.with_cpu_settings(:delta_projection_workspace => false) do
     main()
 end

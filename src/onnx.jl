@@ -1,5 +1,3 @@
-abstract type AbstractDecisionBackend end
-
 """
     ONNXBackend(path; execution_provider=:cpu, output_name="logits",
                 temperature=1.0, max_options=255, provider_options=(;))
@@ -113,3 +111,32 @@ decide(
     inputs::AbstractDict{<:AbstractString},
     question::AbstractQuestion,
 ) = only(decide(backend, inputs, [question]))
+
+"""
+    load_export(directory; execution_provider=:cpu, provider_options=(;))
+
+Load a bundle produced by tools/export_onnx.jl. Read temperature and the
+trained option limit from decision_config.json instead of using uncalibrated
+defaults. This loads the prepared-tensor backend; text preparation is a
+separate step.
+"""
+function load_export(
+    directory::AbstractString;
+    execution_provider::Symbol = :cpu,
+    provider_options::NamedTuple = (;),
+)
+    metadata = JSON.parsefile(joinpath(directory, "export_config.json"))
+    config = JSON.parsefile(joinpath(directory, "decision_config.json"))
+    metadata["format_version"] == 1 || throw(ArgumentError("Unsupported export format."))
+    config["format_version"] == 1 ||
+        throw(ArgumentError("Unsupported decision checkpoint format."))
+    model_file = QwenDecisionCore.safe_relative_path(metadata["model_file"])
+    return ONNXBackend(
+        joinpath(directory, model_file);
+        execution_provider,
+        provider_options,
+        output_name = metadata["output_name"],
+        temperature = config["temperature"],
+        max_options = config["max_options"],
+    )
+end

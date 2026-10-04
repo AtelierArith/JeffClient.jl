@@ -1,6 +1,7 @@
 # CUDA and JeffClient must be installed in the active application environment.
 using CUDA, JeffClient, Statistics
-const JSON = JeffClient.JSON
+using QwenDecisionCore
+const JSON = QwenDecisionCore.JSON
 
 function main()
     3 <= length(ARGS) <= 5 || error(
@@ -42,7 +43,7 @@ function main()
         push!(gpu_allocations, sample.gpu_memstats.alloc_count)
     end
     ext = Base.get_extension(JeffClient, :JeffClientCUDAExt)
-    workspace = ext.workspace(backend.embedding)
+    workspace = ext.workspace(backend.backbone.embedding)
     retained =
         sum(a -> length(a)*sizeof(eltype(a)), workspace.slots) +
         sum(
@@ -67,8 +68,8 @@ function main()
         "sequence_length"=>size(inputs["input_ids"], 2),
         "trim_padding"=>get(ENV, "JEFF_CUDA_TRIM_PADDING", "0") == "1",
         "computed_sequence_lengths"=>[
-            size(inputs["input_ids"], 2)-JeffClient.native_sequence_start(
-                backend.embedding,
+            size(inputs["input_ids"], 2)-QwenDecisionCore.native_sequence_start(
+                backend.backbone.embedding,
                 inputs["attention_mask"],
                 row,
             )+1 for row in axes(inputs["input_ids"], 1)

@@ -1,5 +1,13 @@
 # パフォーマンスの知見
 
+## 2026-10-04: QwenDecisionCore.jl への共通化
+
+- ユーザー指定で、KevClient.jl と同じ「薄いクライアント」構成へ移行。共有コア（backbone forward、safetensors reader/writer、Hub resolver、CPU policy、加速拡張、Choice/Noul/Score）を独立リポジトリ `AtelierArith/QwenDecisionCore.jl` に切り出し、JeffClient は `extern/QwenDecisionCore.jl` サブモジュール経由で依存する。KevClient.jl 側も `packages/` を同リポジトリのサブモジュールに置換した。
+- JeffClient に残したもの: `decision_config.json` / `readout.safetensors` のバンドル、linear readout、ONNX export backend（`ONNXBackend`/`load_export`）。`src/questions.jl`、`safetensors.jl`、`cpu_settings.jl`、`hub.jl`、`native_cpu.jl`、`ext/` は削除。`NativeBackend` は `QwenDecisionCore.QwenBackbone` + host readout の薄いラッパに変更し、`logits`/`decide` の公開 API は維持した。
+- 抽出時に混入していた `escape_hub_path` の退行（`byte in UInt8(codeunits("-._~"))`）を QwenDecisionCore のテスト整備で発見・修正。コアに `test/` を新設し、旧 JeffClient のカーネル/workspace/hub/safetensors テストを移植した（PyTorch 参照、hub は `file://` endpoint、`required`/`auxiliary`/`patterns` キーワードを検証）。
+- Metal の batched forward は QwenDecisionCore の `batch_backbone_hidden`（既定 `nothing`、`QDC_METAL_BATCHED=1` の Metal 拡張が hidden `(hidden, batch)` を返す）へ移植。クライアントは readout を host で適用する。この環境は Intel Mac のため Metal 経路は未実行（設計とシンボル整合のみ確認）。
+- 検証: QwenDecisionCore のオフラインテスト全通過、JeffClient の ONNX/参照テスト通過、`tools/` の内部参照を `QwenDecisionCore.` へ移行し `backend.*` を `backend.backbone.*` に更新、tools 環境の解決と全ファイルのパースを確認。数値や性能の新しい測定は行っていない。
+
 ## 2026-10-01: 自動スレッド CPU 比較を標準 driver の既定へ変更
 
 - ユーザー指定で `tools/mac-M-series.sh` の `--include-auto-cpu` とAUTO_CPU分岐を廃止。PyTorch8とJulia8/Accelerate自動の比較はCPU1対1・GPU比較とともに毎回実行する。スレッド予算が異なる比較としての区別、既定30samples×2fresh processes、逐次実行は維持。追加実験だったJulia1/Accelerate自動はこのフラグの旧機能に含まれておらず、driverへ追加していない。

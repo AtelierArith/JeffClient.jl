@@ -1,6 +1,7 @@
 using JeffClient, InteractiveUtils
+using QwenDecisionCore
 import Cthulhu, TypedSyntax, JSON
-if JeffClient.cpu_setting(:accelerate)
+if QwenDecisionCore.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 
@@ -34,25 +35,28 @@ function main()
     ids = Int64.(first(sample["inputs"]["input_ids"]))
     mask = Int64.(first(sample["inputs"]["attention_mask"]))
     start = findfirst(!iszero, mask)
-    hidden = JeffClient.native_gather(backend.embedding, ids[start:end])
+    hidden = QwenDecisionCore.native_gather(backend.backbone.embedding, ids[start:end])
     mask = mask[start:end]
-    layer = first(backend.layers)
-    cfg = backend.config
+    layer = first(backend.backbone.layers)
+    cfg = backend.backbone.config
     width = size(layer.mlp.gate, 2)
     buffers =
         (zeros(Float32, width, size(hidden, 2)), zeros(Float32, width, size(hidden, 2)))
     targets = (
         hidden = (
-            JeffClient.native_hidden_forward,
-            (hidden, backend.layers, mask, backend.final_norm, cfg),
+            QwenDecisionCore.native_hidden_forward,
+            (hidden, backend.backbone.layers, mask, backend.backbone.final_norm, cfg),
         ),
-        workspace = (JeffClient.cpu_mlp_workspace, (backend.layers, size(hidden, 2))),
+        workspace = (
+            QwenDecisionCore.cpu_mlp_workspace,
+            (backend.backbone.layers, size(hidden, 2)),
+        ),
         layer = (
-            JeffClient.cpu_layer_with_mlp_workspace,
+            QwenDecisionCore.cpu_layer_with_mlp_workspace,
             (layer, hidden, mask, cfg, buffers),
         ),
-        mlp = (JeffClient.native_mlp, (layer.mlp, hidden, buffers)),
-        gate = (JeffClient.cpu_owned_mlp_gate!, buffers),
+        mlp = (QwenDecisionCore.native_mlp, (layer.mlp, hidden, buffers)),
+        gate = (QwenDecisionCore.cpu_owned_mlp_gate!, buffers),
     )
     println(
         "Julia ",

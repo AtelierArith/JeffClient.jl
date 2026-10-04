@@ -1,4 +1,5 @@
 using JeffClient
+using QwenDecisionCore
 using LinearAlgebra
 import Metal
 
@@ -39,7 +40,7 @@ function verify_batched_forward_workspace(extension)
         fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
         cpu, gpu =
             NativeBackend(fixture; device = :cpu), NativeBackend(fixture; device = :metal)
-        ids = reshape(mod.(collect(Int64, 0:17), size(gpu.embedding, 2)), 2, 9)
+        ids = reshape(mod.(collect(Int64, 0:17), size(gpu.backbone.embedding, 2)), 2, 9)
         masks =
             (ones(Int64, 2, 9), [0 0 1 1 0 1 1 0 1; 1 0 1 0 1 0 1 1 1], ones(Int64, 2, 9))
         previous_slots = nothing
@@ -53,7 +54,7 @@ function verify_batched_forward_workspace(extension)
             !workspace.active || error("Batch workspace remained active after readback.")
             if previous_slots !== nothing
                 length(previous_slots) == length(workspace.slots) &&
-                    all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
                     error("Batch mask values replaced workspace slots.")
                 all(
                     get(workspace.tensor_data, key, nothing) === value for
@@ -67,7 +68,7 @@ function verify_batched_forward_workspace(extension)
         # Different batch sizes exercise slot replacement, followed by reuse.
         for batch in (3, 3, 2, 2)
             changed_ids = reshape(
-                mod.(collect(Int64, 0:(batch*9-1)), size(gpu.embedding, 2)),
+                mod.(collect(Int64, 0:(batch*9-1)), size(gpu.backbone.embedding, 2)),
                 batch,
                 9,
             )
@@ -126,7 +127,7 @@ function verify_batched_full_attention(extension)
         ]
         expected = hcat(
             [
-                JeffClient.full_attention(
+                QwenDecisionCore.full_attention(
                     attention,
                     input[:, ((sample-1)*sequence_length+1):(sample*sequence_length)],
                     mask[((sample-1)*sequence_length+1):(sample*sequence_length)],
@@ -312,7 +313,7 @@ function verify_batched_causal_depthwise(extension)
         expected = similar(input)
         for sample = 1:batch
             range = ((sample-1)*sequence_length+1):(sample*sequence_length)
-            expected[:, range] = JeffClient.causal_depthwise(input[:, range], weight)
+            expected[:, range] = QwenDecisionCore.causal_depthwise(input[:, range], weight)
         end
         gpu_input, gpu_weight = Metal.MtlArray(input), Metal.MtlArray(weight)
         for pass = 1:2
@@ -359,7 +360,7 @@ function verify_fused_delta_mask_workspace(extension)
         fixture = joinpath(@__DIR__, "..", "test", "fixtures", "native")
         cpu = NativeBackend(fixture; device = :cpu)
         gpu = NativeBackend(fixture; device = :metal)
-        ids = reshape(mod.(collect(Int64, 0:8), size(gpu.embedding, 2)), 1, 9)
+        ids = reshape(mod.(collect(Int64, 0:8), size(gpu.backbone.embedding, 2)), 1, 9)
         previous_slots = nothing
         for mask in (
             ones(Int64, 1, 9),
@@ -375,7 +376,7 @@ function verify_fused_delta_mask_workspace(extension)
             workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
             if previous_slots !== nothing
                 length(previous_slots) == length(workspace.slots) &&
-                    all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
+                all(a === b for (a, b) in zip(previous_slots, workspace.slots)) ||
                     error("Mask values changed fused workspace slot identities.")
             end
             previous_slots = copy(workspace.slots)
@@ -399,7 +400,7 @@ function verify_weight_tensor_owner(extension)
     first_data = nothing
     for length in (1, 9, 65, 1)
         input = reshape(cos.(Float32.(1:7length)), 7, length)
-        actual = Array(JeffClient.native_linear(weight, Metal.MtlArray(input)))
+        actual = Array(QwenDecisionCore.native_linear(weight, Metal.MtlArray(input)))
         isapprox(actual, transpose(host_weight) * input; atol = 2.0f-5, rtol = 2.0f-5) ||
             error("Cached weight linear mismatch.")
         entry = extension.WEIGHT_TENSOR_CACHE[key]
@@ -433,16 +434,16 @@ function main()
         masks = [0 0 1 0 1; 1 0 1 0 1; 0 0 0 0 1; 1 1 1 1 1]
         ENV["JEFF_METAL_TRIM_PADDING"] = "1"
         for (row, start) in enumerate((3, 1, 5, 1))
-            JeffClient.native_sequence_start(reference, masks, row) == start ||
+            QwenDecisionCore.native_sequence_start(reference, masks, row) == start ||
                 error("Leading padding start mismatch.")
-            cpu_start = JeffClient.with_cpu_settings(:trim_padding => false) do
-                JeffClient.native_sequence_start(zeros(Float32, 1, 1), masks, row)
+            cpu_start = QwenDecisionCore.with_cpu_settings(:trim_padding => false) do
+                QwenDecisionCore.native_sequence_start(zeros(Float32, 1, 1), masks, row)
             end
             cpu_start == 1 || error("Metal trimming flag changed the CPU policy.")
         end
         ENV["JEFF_METAL_TRIM_PADDING"] = "0"
         all(
-            JeffClient.native_sequence_start(reference, masks, row) == 1 for
+            QwenDecisionCore.native_sequence_start(reference, masks, row) == 1 for
             row in axes(masks, 1)
         ) || error("Disabled trimming changed sequence start.")
     finally
@@ -492,7 +493,7 @@ function main()
         mixed = cos.(host)
         weight = sin.(Float32.(1:width))
         expected_residual = host .+ mixed
-        expected = JeffClient.native_rms(expected_residual, weight, 1.0f-6)
+        expected = QwenDecisionCore.native_rms(expected_residual, weight, 1.0f-6)
         gpu_host, gpu_mixed, gpu_weight = Metal.MtlArray.((host, mixed, weight))
         residual, normalized =
             extension.residual_input_rms!(gpu_host, gpu_mixed, gpu_weight, 1.0f-6)
@@ -510,7 +511,7 @@ function main()
         )
         GC.gc(true)
         Array(gpu_host) == expected_residual || error("View RMS changed other columns.")
-        expected = JeffClient.native_rms(expected_residual[:, column], weight, 1.0f-6)
+        expected = QwenDecisionCore.native_rms(expected_residual[:, column], weight, 1.0f-6)
         isapprox(Array(normalized), expected; atol = 2.0f-5, rtol = 2.0f-5) ||
             error("View input RMS mismatch after GC.")
     end
@@ -519,11 +520,11 @@ function main()
         host = reshape(sin.(Float32.(1:(width*sequence_length))), width, sequence_length)
         mixed = cos.(host)
         gpu_host, gpu_mixed = Metal.MtlArray.((host, mixed))
-        result = JeffClient.native_residual_add!(gpu_host, gpu_mixed)
+        result = QwenDecisionCore.native_residual_add!(gpu_host, gpu_mixed)
         result === gpu_host || error("Residual addition must reuse its destination.")
         Array(result) == host .+ mixed || error("Dedicated residual addition mismatch.")
         GC.gc(true)
-        JeffClient.native_residual_add!(gpu_host, gpu_host)
+        QwenDecisionCore.native_residual_add!(gpu_host, gpu_host)
         Array(gpu_host) == 2.0f0 .* (host .+ mixed) ||
             error("Aliased residual addition mismatch.")
     end
@@ -536,11 +537,11 @@ function main()
         )
         up = reshape(cos.(Float32.(1:(width*sequence_length))), size(gate))
         gpu_gate, gpu_up = Metal.MtlArray.((gate, up))
-        result = JeffClient.native_mlp_gate!(gpu_gate, gpu_up)
+        result = QwenDecisionCore.native_mlp_gate!(gpu_gate, gpu_up)
         result === gpu_gate || error("MLP gate must reuse its destination.")
         isapprox(
             Array(result),
-            JeffClient.native_silu.(gate) .* up;
+            QwenDecisionCore.native_silu.(gate) .* up;
             atol = 2.0f-5,
             rtol = 2.0f-5,
         ) || error("Dedicated MLP gate mismatch.")
@@ -558,12 +559,12 @@ function main()
         )
         expected =
             transpose(down_weight) * (
-                JeffClient.native_silu.(transpose(gate_weight) * host) .*
+                QwenDecisionCore.native_silu.(transpose(gate_weight) * host) .*
                 (transpose(up_weight) * host)
             )
         gpu_host = Metal.MtlArray(host)
         for pass = 1:2
-            actual = Array(JeffClient.native_mlp(mlp, gpu_host))
+            actual = Array(QwenDecisionCore.native_mlp(mlp, gpu_host))
             isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
                 error("Packed MLP mismatch.")
             GC.gc(true)
@@ -602,13 +603,13 @@ function main()
         )
         isapprox(
             Array(beta),
-            JeffClient.native_sigmoid.(b);
+            QwenDecisionCore.native_sigmoid.(b);
             atol = 2.0f-6,
             rtol = 2.0f-5,
         ) || error("Fused delta beta mismatch.")
         isapprox(
             Array(decay),
-            a_decay .* JeffClient.native_softplus.(a .+ dt_bias);
+            a_decay .* QwenDecisionCore.native_softplus.(a .+ dt_bias);
             atol = 2.0f-5,
             rtol = 2.0f-5,
         ) || error("Fused delta decay mismatch.")
@@ -629,14 +630,16 @@ function main()
         for sequence_length in (9, 9, 1, 1, 65, 65)
             input = reshape(cos.(Float32.(1:7sequence_length)), 7, sequence_length)
             device_input = Metal.MtlArray(input)
-            actual = JeffClient.native_forward_scope(weight) do
+            actual = QwenDecisionCore.native_forward_scope(weight) do
                 extension.launch_cached_kernel!(
                     captured_kernel_handle_probe(5.0f0),
                     probe;
                     threads = 32,
                     groups = 1,
                 )
-                JeffClient.native_host(JeffClient.native_linear(weight, device_input))
+                QwenDecisionCore.native_host(
+                    QwenDecisionCore.native_linear(weight, device_input),
+                )
             end
             isapprox(
                 actual,
@@ -671,10 +674,10 @@ function main()
         previous_input_data = nothing
         previous_owned_input = nothing
         for sequence_length in (9, 9, 1, 1, 65, 65)
-            actual = JeffClient.native_forward_scope(weight) do
+            actual = QwenDecisionCore.native_forward_scope(weight) do
                 owned_input = extension.pooled_array(Float32, (7, sequence_length))
                 fill!(owned_input, 1.0f0)
-                result = JeffClient.native_linear(weight, owned_input)
+                result = QwenDecisionCore.native_linear(weight, owned_input)
                 current_workspace = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
                 data = current_workspace.tensor_data[objectid(owned_input)][1]
                 if previous_owned_input !== nothing &&
@@ -685,7 +688,7 @@ function main()
                         error("Past slot tensor-data was not reused.")
                 end
                 previous_owned_input, previous_input_data = owned_input, data
-                JeffClient.native_host(result)
+                QwenDecisionCore.native_host(result)
             end
             isapprox(
                 actual,
@@ -702,8 +705,8 @@ function main()
             GC.gc(true)
         end
         failed = try
-            JeffClient.native_forward_scope(weight) do
-                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 3)))
+            QwenDecisionCore.native_forward_scope(weight) do
+                QwenDecisionCore.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 3)))
                 error("workspace failure probe")
             end
             false
@@ -736,11 +739,11 @@ function main()
             input = Metal.MtlArray(host)
             expected =
                 transpose(down_weight) * (
-                    JeffClient.native_silu.(transpose(gate_weight) * host) .*
+                    QwenDecisionCore.native_silu.(transpose(gate_weight) * host) .*
                     (transpose(up_weight) * host)
                 )
-            actual = JeffClient.native_forward_scope(input) do
-                JeffClient.native_host(JeffClient.native_mlp(packed_mlp, input))
+            actual = QwenDecisionCore.native_forward_scope(input) do
+                QwenDecisionCore.native_host(QwenDecisionCore.native_mlp(packed_mlp, input))
             end
             isapprox(actual, expected; atol = 2.0f-4, rtol = 2.0f-4) ||
                 error("Packed workspace MLP mismatch.")
@@ -767,13 +770,13 @@ function main()
             GC.gc(true)
         end
         try
-            JeffClient.native_forward_scope(weight) do
-                JeffClient.native_mlp(packed_mlp, Metal.MtlArray(ones(Float32, 7, 3)))
+            QwenDecisionCore.native_forward_scope(weight) do
+                QwenDecisionCore.native_mlp(packed_mlp, Metal.MtlArray(ones(Float32, 7, 3)))
                 error("packed workspace failure probe")
             end
         catch exception
             exception isa ErrorException &&
-                exception.msg == "packed workspace failure probe" || rethrow()
+            exception.msg == "packed workspace failure probe" || rethrow()
         end
         !workspace.active || error("Packed workspace stays active after exception.")
         for (key, values) in workspace.feed_values
@@ -782,17 +785,17 @@ function main()
         end
         extension.clear_forward_workspace!()
         isempty(workspace.slots) &&
-            isempty(workspace.tensor_data) &&
-            isempty(workspace.slot_indices) &&
-            isempty(workspace.feed_values) ||
+        isempty(workspace.tensor_data) &&
+        isempty(workspace.slot_indices) &&
+        isempty(workspace.feed_values) ||
             error("Packed workspace retains objects after clear.")
         ENV["JEFF_METAL_SHAPE_WORKSPACES"] = "1"
         previous_shape_arrays = Dict{Int,Any}()
         previous_shape_data = Dict{Int,Any}()
         for sequence_length in (9, 1, 9, 1, 65)
             input = Metal.MtlArray(ones(Float32, 7, sequence_length))
-            actual = JeffClient.native_forward_scope(weight, sequence_length) do
-                JeffClient.native_host(JeffClient.native_linear(weight, input))
+            actual = QwenDecisionCore.native_forward_scope(weight, sequence_length) do
+                QwenDecisionCore.native_host(QwenDecisionCore.native_linear(weight, input))
             end
             isapprox(
                 actual,
@@ -819,32 +822,32 @@ function main()
         bank = task_local_storage(extension.SHAPE_WORKSPACE_KEY)
         bank.order == [1, 65] || error("Shape workspace LRU mismatch.")
         bank.byte_limit = extension.BUFFER_PAGE
-        JeffClient.native_forward_scope(weight, 9) do
-            JeffClient.native_host(
-                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9))),
+        QwenDecisionCore.native_forward_scope(weight, 9) do
+            QwenDecisionCore.native_host(
+                QwenDecisionCore.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9))),
             )
         end
         collect(keys(bank.entries)) == [9] ||
             error("Shape workspace byte limit not enforced.")
         bank.byte_limit = typemax(Int)
-        JeffClient.native_forward_scope(weight, 9) do
+        QwenDecisionCore.native_forward_scope(weight, 9) do
             current = task_local_storage(extension.FORWARD_WORKSPACE_KEY)
-            JeffClient.native_forward_scope(weight, 99) do
+            QwenDecisionCore.native_forward_scope(weight, 99) do
                 task_local_storage(extension.FORWARD_WORKSPACE_KEY) === current ||
                     error("Nested scope changed workspace.")
-                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9)))
+                QwenDecisionCore.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 9)))
             end
             Metal.synchronize()
         end
         !haskey(bank.entries, 99) || error("Nested scope added shape workspace.")
         try
-            JeffClient.native_forward_scope(weight, 1) do
-                JeffClient.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 1)))
+            QwenDecisionCore.native_forward_scope(weight, 1) do
+                QwenDecisionCore.native_linear(weight, Metal.MtlArray(ones(Float32, 7, 1)))
                 error("shape workspace failure probe")
             end
         catch exception
             exception isa ErrorException &&
-                exception.msg == "shape workspace failure probe" || rethrow()
+            exception.msg == "shape workspace failure probe" || rethrow()
         end
         for entry in values(bank.entries)
             !entry.active || error("Shape workspace active after failure.")
@@ -881,12 +884,12 @@ function main()
         host = reshape(sin.(Float32.(1:(width*11))), width, 11)
         embedding = Metal.MtlArray(host)
         for ids in (Int64[], Int64[0], Int64[10, 0, 5, 5, 10])
-            actual = Array(JeffClient.native_gather(embedding, ids))
-            actual == host[:, ids.+1] || error("Embedding gather mismatch.")
+            actual = Array(QwenDecisionCore.native_gather(embedding, ids))
+            actual == host[:, ids .+ 1] || error("Embedding gather mismatch.")
         end
         for ids in (Int64[-1], Int64[11], Int64[0, typemax(Int64)])
             caught = try
-                JeffClient.native_gather(embedding, ids)
+                QwenDecisionCore.native_gather(embedding, ids)
                 false
             catch exception
                 exception isa ArgumentError || rethrow()
@@ -949,14 +952,14 @@ function main()
         host = reshape(sin.(Float32.(1:(width*6))), width, 2, 3)
         weight = cos.(Float32.(1:width)) .* 0.1f0
         actual = Array(
-            JeffClient.native_rms(
+            QwenDecisionCore.native_rms(
                 Metal.MtlArray(host),
                 Metal.MtlArray(weight),
                 1.0f-6;
                 centered,
             ),
         )
-        expected = JeffClient.native_rms(host, weight, 1.0f-6; centered)
+        expected = QwenDecisionCore.native_rms(host, weight, 1.0f-6; centered)
         isapprox(actual, expected; atol = 2.0f-5, rtol = 2.0f-5) || error("RMS mismatch.")
         mask = Float32[0, 1, 0, 1, 1, 1]
         gpu_mask = Metal.MtlArray(mask)
@@ -989,7 +992,8 @@ function main()
             )
             sum_expected = matrix .+ added
             norm_expected =
-                JeffClient.native_rms(sum_expected, weight, 1.0f-6) .* permutedims(mask)
+                QwenDecisionCore.native_rms(sum_expected, weight, 1.0f-6) .*
+                permutedims(mask)
             isapprox(Array(residual), sum_expected; atol = 2.0f-5, rtol = 2.0f-5) ||
                 error("Masked normalization modified the residual mask.")
             isapprox(Array(normalized), norm_expected; atol = 2.0f-5, rtol = 2.0f-5) ||
@@ -1044,14 +1048,18 @@ function main()
         actual_k, actual_v = Array(gpu_key), Array(gpu_value)
         qheads = reshape(qgate, 2width, heads, length)
         expected_q = permutedims(
-            JeffClient.native_rope(
-                JeffClient.native_rms(qheads[1:width, :, :], weight, cfg.eps),
+            QwenDecisionCore.native_rope(
+                QwenDecisionCore.native_rms(qheads[1:width, :, :], weight, cfg.eps),
                 cfg,
             ),
             (1, 3, 2),
         )
-        expected_k = JeffClient.native_rope(
-            JeffClient.native_rms(reshape(key, width, kv_heads, length), weight, cfg.eps),
+        expected_k = QwenDecisionCore.native_rope(
+            QwenDecisionCore.native_rms(
+                reshape(key, width, kv_heads, length),
+                weight,
+                cfg.eps,
+            ),
             cfg,
         )
         mapping = [cld(head, heads ÷ kv_heads) for head = 1:heads]
@@ -1066,7 +1074,7 @@ function main()
         merged = Array(extension.merge_gate(gpu_value, gpu_q, cfg, length))
         expected_merged = reshape(
             permutedims(expected_v, (1, 3, 2)) .*
-            JeffClient.native_sigmoid.(qheads[(width+1):end, :, :]),
+            QwenDecisionCore.native_sigmoid.(qheads[(width+1):end, :, :]),
             width * heads,
             length,
         )
@@ -1081,8 +1089,8 @@ function main()
         gate = reshape(12.0f0 .* cos.(Float32.(1:(width*6))), size(host))
         weight = cos.(Float32.(1:width)) .* 0.1f0
         expected =
-            JeffClient.native_rms(host, weight, 1.0f-6; centered = false) .*
-            JeffClient.native_silu.(gate)
+            QwenDecisionCore.native_rms(host, weight, 1.0f-6; centered = false) .*
+            QwenDecisionCore.native_silu.(gate)
         gpu_host, gpu_gate, gpu_weight = Metal.MtlArray.((host, gate, weight))
         for pass = 1:2
             actual = Array(extension.rms_silu_gate(gpu_host, gpu_gate, gpu_weight, 1.0f-6))

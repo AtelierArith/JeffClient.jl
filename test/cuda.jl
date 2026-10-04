@@ -1,5 +1,6 @@
 # Optional hardware suite: run with CUDA and JeffClient in the active environment.
 using Test, CUDA, JeffClient
+using QwenDecisionCore
 const JSON = JeffClient.JSON
 CUDA.functional(true) || error("The CUDA test suite requires a functional GPU.")
 CUDA.allowscalar(false)
@@ -20,8 +21,8 @@ end
         for (left, right) in ((a, transpose(b)), (transpose(a), b))
             expected =
                 left === a ? Array(a)*transpose(Array(b)) : transpose(Array(a))*Array(b)
-            actual = JeffClient.native_forward_scope(backend.embedding) do
-                Array(JeffClient.native_matmul(left, right))
+            actual = QwenDecisionCore.native_forward_scope(backend.backbone.embedding) do
+                Array(QwenDecisionCore.native_matmul(left, right))
             end
             @test actual ≈ expected
         end
@@ -48,8 +49,11 @@ end
             expected_start =
                 get(ENV, "JEFF_CUDA_TRIM_PADDING", "0") == "1" ?
                 findfirst(==(1), view(masks, row, :)) : 1
-            @test JeffClient.native_sequence_start(backend.embedding, masks, row) ==
-                  expected_start
+            @test QwenDecisionCore.native_sequence_start(
+                backend.backbone.embedding,
+                masks,
+                row,
+            ) == expected_start
         end
     end
     inputs = inputs_for(last(cases))
@@ -59,8 +63,13 @@ end
         @test fetch(task) ≈ expected atol=2e-5 rtol=2e-5
     end
     # A failed forward may have queued GPU work; subsequent reuse must be safe.
-    @test_throws ErrorException JeffClient.native_forward_scope(backend.embedding) do
-        buffer = JeffClient.native_matmul(backend.embedding, transpose(backend.embedding))
+    @test_throws ErrorException QwenDecisionCore.native_forward_scope(
+        backend.backbone.embedding,
+    ) do
+        buffer = QwenDecisionCore.native_matmul(
+            backend.backbone.embedding,
+            transpose(backend.backbone.embedding),
+        )
         error("injected failure after queued matmul")
     end
     @test JeffClient.logits(backend, inputs) ≈ expected atol=2e-5 rtol=2e-5
@@ -68,7 +77,7 @@ end
         original = CUDA.device()
         CUDA.device!(first(device for device in CUDA.devices() if device != original))
         @test JeffClient.logits(backend, inputs) ≈ expected atol=2e-5 rtol=2e-5
-        @test CUDA.device() != CUDA.device(backend.embedding)
+        @test CUDA.device() != CUDA.device(backend.backbone.embedding)
         CUDA.device!(original)
     end
 end

@@ -1,4 +1,5 @@
 using JeffClient
+using QwenDecisionCore
 using InteractiveUtils
 using LinearAlgebra
 using Profile
@@ -65,41 +66,53 @@ function main()
     println("Backend type: ", typeof(backend))
     println(
         "Layer storage type: ",
-        typeof(backend.layers),
+        typeof(backend.backbone.layers),
         "; eltype: ",
-        eltype(backend.layers),
+        eltype(backend.backbone.layers),
     )
     report_target("logits", logits, backend, inputs)
-    hidden = JeffClient.native_gather(backend.embedding, vec(inputs["input_ids"][1, :]))
+    hidden = QwenDecisionCore.native_gather(
+        backend.backbone.embedding,
+        vec(inputs["input_ids"][1, :]),
+    )
     mask = vec(inputs["attention_mask"][1, :])
-    delta = first(layer for layer in backend.layers if layer.attention.kind == :delta)
-    full = first(layer for layer in backend.layers if layer.attention.kind == :full)
+    delta =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :delta)
+    full =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :full)
     report_target(
         "delta layer",
-        JeffClient.native_layer,
+        QwenDecisionCore.native_layer,
         delta,
         hidden,
         mask,
-        backend.config,
+        backend.backbone.config,
     )
-    report_target("full layer", JeffClient.native_layer, full, hidden, mask, backend.config)
+    report_target(
+        "full layer",
+        QwenDecisionCore.native_layer,
+        full,
+        hidden,
+        mask,
+        backend.backbone.config,
+    )
     report_target(
         "DeltaNet",
-        JeffClient.delta_attention,
+        QwenDecisionCore.delta_attention,
         delta.attention,
         hidden,
         mask,
-        backend.config,
+        backend.backbone.config,
     )
     report_target(
         "linear projection",
-        JeffClient.native_linear,
+        QwenDecisionCore.native_linear,
         delta.attention.qkv,
         hidden,
     )
     report_target(
         "Metal matmul",
-        JeffClient.native_matmul,
+        QwenDecisionCore.native_matmul,
         transpose(delta.attention.qkv),
         hidden,
     )
@@ -148,7 +161,7 @@ function main()
     by_dependency_site = Dict{String,Tuple{Int,Int}}()
     for allocation in records
         relevant = findfirst(
-            frame -> occursin("/JeffClient.jl/", string(frame.file)),
+            frame -> occursin("/QwenDecisionCore.jl/", string(frame.file)),
             allocation.stacktrace,
         )
         site = if relevant === nothing

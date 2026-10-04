@@ -1,5 +1,6 @@
 using BenchmarkTools
 using JeffClient
+using QwenDecisionCore
 using LinearAlgebra
 import JSON
 import Metal
@@ -25,9 +26,12 @@ function measure_stage(name, f, args)
 end
 
 function mlp_projection(mlp, x)
-    gate = JeffClient.native_linear(mlp.gate, x)
-    up = JeffClient.native_linear(mlp.up, x)
-    return JeffClient.native_linear(mlp.down, JeffClient.native_mlp_gate!(gate, up))
+    gate = QwenDecisionCore.native_linear(mlp.gate, x)
+    up = QwenDecisionCore.native_linear(mlp.up, x)
+    return QwenDecisionCore.native_linear(
+        mlp.down,
+        QwenDecisionCore.native_mlp_gate!(gate, up),
+    )
 end
 
 function packed_mlp_gate_kernel!(output, packed)
@@ -38,13 +42,13 @@ function packed_mlp_gate_kernel!(output, packed)
         column = div(index - Int32(1), width)
         source = row + Int32(2) * width * column
         @inbounds output[index] =
-            JeffClient.native_silu(packed[source]) * packed[source+width]
+            QwenDecisionCore.native_silu(packed[source]) * packed[source+width]
     end
     return
 end
 
 function packed_mlp_projection(extension, packed_weight, down, x)
-    packed = JeffClient.native_linear(packed_weight, x)
+    packed = QwenDecisionCore.native_linear(packed_weight, x)
     gate = extension.pooled_array(Float32, (size(packed, 1) ÷ 2, size(x, 2)))
     extension.launch_cached_kernel!(
         packed_mlp_gate_kernel!,
@@ -53,15 +57,15 @@ function packed_mlp_projection(extension, packed_weight, down, x)
         threads = 256,
         groups = cld(length(gate), 256),
     )
-    return JeffClient.native_linear(down, gate)
+    return QwenDecisionCore.native_linear(down, gate)
 end
 
 function delta_input_projections(attention, x)
     return (
-        JeffClient.native_linear(attention.qkv, x),
-        JeffClient.native_linear(attention.z, x),
-        JeffClient.native_linear(attention.b, x),
-        JeffClient.native_linear(attention.a, x),
+        QwenDecisionCore.native_linear(attention.qkv, x),
+        QwenDecisionCore.native_linear(attention.z, x),
+        QwenDecisionCore.native_linear(attention.b, x),
+        QwenDecisionCore.native_linear(attention.a, x),
     )
 end
 
@@ -79,8 +83,8 @@ function packed_qk_separate(extension, mixed, cfg, sequence_length)
 end
 
 function delta_gates_separate(b, a, a_decay, dt_bias)
-    return JeffClient.native_sigmoid.(b),
-    a_decay .* JeffClient.native_softplus.(a .+ dt_bias)
+    return QwenDecisionCore.native_sigmoid.(b),
+    a_decay .* QwenDecisionCore.native_softplus.(a .+ dt_bias)
 end
 
 function delta_recurrent_stage(
@@ -132,16 +136,18 @@ function main()
     ids = Int64.(first(sample["inputs"]["input_ids"]))
     mask = Int64.(first(sample["inputs"]["attention_mask"]))
     backend = NativeBackend(ARGS[1]; device = :metal)
-    hidden = JeffClient.native_gather(backend.embedding, ids)
-    prepared_mask = JeffClient.native_prepare_mask(hidden, mask)
-    delta = first(layer for layer in backend.layers if layer.attention.kind == :delta)
-    full = first(layer for layer in backend.layers if layer.attention.kind == :full)
-    mixed = JeffClient.native_linear(delta.attention.qkv, hidden)
+    hidden = QwenDecisionCore.native_gather(backend.backbone.embedding, ids)
+    prepared_mask = QwenDecisionCore.native_prepare_mask(hidden, mask)
+    delta =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :delta)
+    full =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :full)
+    mixed = QwenDecisionCore.native_linear(delta.attention.qkv, hidden)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
-    cfg = backend.config
+    cfg = backend.backbone.config
     masked = hidden .* reshape(prepared_mask.device, 1, :)
-    delta_mixed = JeffClient.causal_depthwise(
-        JeffClient.native_linear(delta.attention.qkv, masked),
+    delta_mixed = QwenDecisionCore.causal_depthwise(
+        QwenDecisionCore.native_linear(delta.attention.qkv, masked),
         delta.attention.conv,
     )
     query =
@@ -153,8 +159,8 @@ function main()
         cfg.key_dim * cfg.key_heads,
         1.0f0,
     )
-    b_projection = JeffClient.native_linear(delta.attention.b, masked)
-    a_projection = JeffClient.native_linear(delta.attention.a, masked)
+    b_projection = QwenDecisionCore.native_linear(delta.attention.b, masked)
+    a_projection = QwenDecisionCore.native_linear(delta.attention.a, masked)
     beta, decay = extension.delta_gates(
         b_projection,
         a_projection,
@@ -162,7 +168,7 @@ function main()
         delta.attention.dt_bias,
     )
     gate = reshape(
-        JeffClient.native_linear(delta.attention.z, masked),
+        QwenDecisionCore.native_linear(delta.attention.z, masked),
         cfg.value_dim,
         cfg.value_heads,
         length(ids),
@@ -218,13 +224,13 @@ function main()
         measure_stage(name, f, args) for (name, f, args) in (
             (
                 "DeltaNet attention",
-                JeffClient.delta_attention,
-                (delta.attention, hidden, prepared_mask, backend.config),
+                QwenDecisionCore.delta_attention,
+                (delta.attention, hidden, prepared_mask, backend.backbone.config),
             ),
             (
                 "full attention",
-                JeffClient.full_attention,
-                (full.attention, hidden, prepared_mask, backend.config),
+                QwenDecisionCore.full_attention,
+                (full.attention, hidden, prepared_mask, backend.backbone.config),
             ),
             ("MLP projections", mlp_projection, (delta.mlp, hidden)),
             (
@@ -234,15 +240,19 @@ function main()
             ),
             (
                 "RMS normalization",
-                JeffClient.native_rms,
-                (hidden, delta.input_norm, backend.config.eps),
+                QwenDecisionCore.native_rms,
+                (hidden, delta.input_norm, backend.backbone.config.eps),
             ),
             (
                 "causal depthwise convolution",
-                JeffClient.causal_depthwise,
+                QwenDecisionCore.causal_depthwise,
                 (mixed, delta.attention.conv),
             ),
-            ("QKV projection", JeffClient.native_linear, (delta.attention.qkv, hidden)),
+            (
+                "QKV projection",
+                QwenDecisionCore.native_linear,
+                (delta.attention.qkv, hidden),
+            ),
             (
                 "DeltaNet input projections",
                 delta_input_projections,

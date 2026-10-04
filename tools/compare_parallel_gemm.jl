@@ -1,5 +1,6 @@
 using JeffClient, LinearAlgebra, BenchmarkTools, Test
-if JeffClient.cpu_setting(:accelerate)
+using QwenDecisionCore
+if QwenDecisionCore.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 
@@ -23,12 +24,12 @@ end
 function main()
     backend = NativeBackend(only(ARGS))
     BLAS.set_num_threads(1)
-    JeffClient.cpu_setting(:accelerate) && AppleAccelerate.set_num_threads(1)
+    QwenDecisionCore.cpu_setting(:accelerate) && AppleAccelerate.set_num_threads(1)
     println("BLAS ", BLAS.get_config(), "; threads=", BLAS.get_num_threads())
     for (name, original) in (
-            ("gate", first(backend.layers).mlp.gate),
-            ("down", first(backend.layers).mlp.down),
-            ("qkv", first(backend.layers).attention.qkv),
+            ("gate", first(backend.backbone.layers).mlp.gate),
+            ("down", first(backend.backbone.layers).mlp.down),
+            ("qkv", first(backend.backbone.layers).attention.qkv),
         ),
         packed in (false, true)
 

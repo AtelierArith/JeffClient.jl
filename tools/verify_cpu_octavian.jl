@@ -1,4 +1,5 @@
 using JeffClient, Octavian, LinearAlgebra, Test, InteractiveUtils
+using QwenDecisionCore
 @assert Base.get_extension(JeffClient, :JeffClientOctavianExt) !== nothing
 
 @testset "Worker-local serial Octavian state products" begin
@@ -11,8 +12,8 @@ using JeffClient, Octavian, LinearAlgebra, Test, InteractiveUtils
             expected = copy(output)
             mul!(expected, state, rhs, -1.0f0, beta)
             original_state, original_rhs = copy(state), copy(rhs)
-            JeffClient.with_cpu_settings(:octavian_delta => "1") do
-                JeffClient.cpu_delta_state_product!(output, state, rhs, -1.0f0, beta)
+            QwenDecisionCore.with_cpu_settings(:octavian_delta => "1") do
+                QwenDecisionCore.cpu_delta_state_product!(output, state, rhs, -1.0f0, beta)
             end
             @test output ≈ expected atol=2e-5 rtol=2e-5
             @test state == original_state
@@ -21,9 +22,9 @@ using JeffClient, Octavian, LinearAlgebra, Test, InteractiveUtils
     end
 end
 
-JeffClient.with_cpu_settings(:octavian_delta => "1") do
+QwenDecisionCore.with_cpu_settings(:octavian_delta => "1") do
     a = ones(Float32, 128, 128)
     b = ones(Float32, 128, 64)
     c = similar(b)
-    @code_warntype JeffClient.cpu_delta_state_product!(c, a, b, 1.0f0, 0.0f0)
+    @code_warntype QwenDecisionCore.cpu_delta_state_product!(c, a, b, 1.0f0, 0.0f0)
 end

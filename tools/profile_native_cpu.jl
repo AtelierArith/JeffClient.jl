@@ -1,19 +1,20 @@
 using JeffClient
+using QwenDecisionCore
 using LinearAlgebra
 using InteractiveUtils
 using Profile
 import JSON
 import JET
-if JeffClient.cpu_setting(:portable_vector_math)
+if QwenDecisionCore.cpu_setting(:portable_vector_math)
     import LoopVectorization
     Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
         error("LoopVectorization extension was not loaded.")
 end
-if JeffClient.cpu_setting(:octavian_delta)
+if QwenDecisionCore.cpu_setting(:octavian_delta)
     import Octavian
 end
 
-if JeffClient.cpu_setting(:accelerate)
+if QwenDecisionCore.cpu_setting(:accelerate)
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
@@ -22,7 +23,7 @@ end
 
 function main()
     length(ARGS) == 2 || error("Usage: profile_native_cpu.jl CHECKPOINT REFERENCE_JSON")
-    JeffClient.initialize_cpu!()
+    QwenDecisionCore.initialize_cpu!()
     sample = only(JSON.parsefile(ARGS[2]))
     inputs = Dict(
         name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for

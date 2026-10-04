@@ -74,8 +74,32 @@ const MODEL = joinpath(@__DIR__, "fixtures", "logits.onnx")
     end
 end
 
-include("hub.jl")
-include("native.jl")
+@testset "Native Qwen versus independent PyTorch reference" begin
+    path = joinpath(@__DIR__, "fixtures", "native")
+    backend = NativeBackend(path)
+    rows_to_matrix(rows, T) = reduce(vcat, [permutedims(T.(row)) for row in rows])
+    for sample in JSON.parsefile(joinpath(path, "reference.json"))
+        inputs =
+            Dict(name => rows_to_matrix(rows, Int64) for (name, rows) in sample["inputs"])
+        expected = rows_to_matrix(sample["logits"], Float32)
+        actual = logits(backend, inputs)
+        @test actual ≈ expected atol = 2e-5 rtol = 2e-5
+        questions = [ChoiceQuestion(["a" => "A", "b" => "B", "c" => "C"]), NoulQuestion()]
+        answers = decide(backend, inputs, questions)
+        @test answers[1].choice == ["a", "b", "c"][argmax(expected[1, :])]
+        weights = exp.((expected[2, 1:2] .- maximum(expected[2, 1:2])) ./ 1.25)
+        @test answers[2].noul ≈ weights[2] / sum(weights) atol = 2e-5
+    end
+    @test_throws ArgumentError logits(backend, Dict("input_ids" => ones(Int64, 1, 2)))
+    @test_throws ArgumentError logits(
+        backend,
+        Dict("input_ids" => ones(Int64, 1, 2), "attention_mask" => zeros(Int64, 1, 2)),
+    )
+    @test_throws ArgumentError logits(
+        backend,
+        Dict("input_ids" => fill(Int64(64), 1, 2), "attention_mask" => ones(Int64, 1, 2)),
+    )
+end
 
 @testset "Calibration and checkpoint limits" begin
     backend = ONNXBackend(MODEL; temperature = 2, max_options = 2)
@@ -113,4 +137,45 @@ end
     end
     @test_throws ArgumentError ONNXBackend(MODEL; max_options = 0)
     @test_throws ArgumentError ONNXBackend(MODEL; max_options = 256)
+end
+
+@testset "Export metadata calibration" begin
+    mktempdir() do dir
+        cp(MODEL, joinpath(dir, "model.onnx"))
+        write(
+            joinpath(dir, "export_config.json"),
+            JSON.json(
+                Dict(
+                    "format_version" => 1,
+                    "model_file" => "model.onnx",
+                    "output_name" => "logits",
+                ),
+            ),
+        )
+        write(
+            joinpath(dir, "decision_config.json"),
+            JSON.json(
+                Dict("format_version" => 1, "temperature" => 2.0, "max_options" => 2),
+            ),
+        )
+        backend = load_export(dir)
+        try
+            result = decide(backend, Dict("scores" => Float32[0 log(9)]), NoulQuestion())
+            @test result.noul ≈ 0.75 rtol=1e-6
+            @test backend.max_options == 2
+        finally
+            close(backend)
+        end
+        write(
+            joinpath(dir, "export_config.json"),
+            JSON.json(
+                Dict(
+                    "format_version" => 1,
+                    "model_file" => "../model.onnx",
+                    "output_name" => "logits",
+                ),
+            ),
+        )
+        @test_throws ArgumentError load_export(dir)
+    end
 end

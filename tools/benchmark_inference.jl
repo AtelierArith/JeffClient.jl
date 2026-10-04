@@ -1,25 +1,26 @@
 using BenchmarkTools
 using JeffClient
+using QwenDecisionCore
 using LinearAlgebra
 using Profile
 import JSON
-if JeffClient.cpu_setting(:portable_vector_math)
+if QwenDecisionCore.cpu_setting(:portable_vector_math)
     import LoopVectorization
     Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) === nothing &&
         error("LoopVectorization extension was not loaded; run Pkg.resolve().")
 end
-if JeffClient.cpu_setting(:octavian_delta)
+if QwenDecisionCore.cpu_setting(:octavian_delta)
     import Octavian
     Base.get_extension(JeffClient, :JeffClientOctavianExt) === nothing &&
         error("Octavian extension was not loaded; run Pkg.resolve() before benchmarking.")
 end
-if JeffClient.cpu_setting(:simd)
+if QwenDecisionCore.cpu_setting(:simd)
     import SIMD
     Base.get_extension(JeffClient, :JeffClientSIMDExt) === nothing &&
         error("SIMD extension was not loaded; run Pkg.resolve() before benchmarking.")
 end
 
-if JeffClient.cpu_setting(:accelerate)
+if QwenDecisionCore.cpu_setting(:accelerate)
     Sys.isapple() || error("Apple Accelerate requires macOS.")
     import AppleAccelerate
     any(lib -> occursin("Accelerate", lib.libname), BLAS.get_config().loaded_libs) ||
@@ -105,50 +106,57 @@ function run_benchmark(args, profile, warmups = 2)
         )
         if device == :cpu
             result["cpu_policy"] =
-                JeffClient.cpu_setting(:accelerate) ? "apple_accelerate" : "portable"
+                QwenDecisionCore.cpu_setting(:accelerate) ? "apple_accelerate" : "portable"
             result["cpu_mlp_residual_fusion_enabled"] =
-                JeffClient.cpu_setting(:mlp_residual_fusion)
+                QwenDecisionCore.cpu_setting(:mlp_residual_fusion)
             result["cpu_delta_projection_workspace_enabled"] =
-                JeffClient.cpu_setting(:delta_projection_workspace)
+                QwenDecisionCore.cpu_setting(:delta_projection_workspace)
             result["cpu_vector_math_blocks_enabled"] =
-                JeffClient.cpu_setting(:vector_math_blocks)
-            result["cpu_delta_norm_loop_enabled"] = JeffClient.cpu_setting(:delta_norm_loop)
+                QwenDecisionCore.cpu_setting(:vector_math_blocks)
+            result["cpu_delta_norm_loop_enabled"] =
+                QwenDecisionCore.cpu_setting(:delta_norm_loop)
             result["cpu_parallel_full_heads_enabled"] =
-                JeffClient.cpu_setting(:parallel_full_heads)
+                QwenDecisionCore.cpu_setting(:parallel_full_heads)
             result["cpu_projection_thread_scope_enabled"] =
-                JeffClient.cpu_setting(:projection_thread_scope)
+                QwenDecisionCore.cpu_setting(:projection_thread_scope)
             result["cpu_parallel_projections_enabled"] =
-                JeffClient.cpu_setting(:parallel_projections)
+                QwenDecisionCore.cpu_setting(:parallel_projections)
             result["model_retained_julia_bytes"] = Base.summarysize(backend)
             # Process high-water mark includes startup/loading/compilation, not
             # only the warmed inference; it is not cumulative Julia heap bytes.
             result["process_peak_rss_bytes"] = Sys.maxrss()
             result["cpu_portable_vector_math_enabled"] =
-                JeffClient.cpu_setting(:portable_vector_math)
-            result["cpu_recurrent_delta_enabled"] = JeffClient.cpu_setting(:recurrent_delta)
-            result["cpu_octavian_delta_enabled"] = JeffClient.cpu_setting(:octavian_delta)
-            result["cpu_final_query_enabled"] = JeffClient.cpu_setting(:final_query)
+                QwenDecisionCore.cpu_setting(:portable_vector_math)
+            result["cpu_recurrent_delta_enabled"] =
+                QwenDecisionCore.cpu_setting(:recurrent_delta)
+            result["cpu_octavian_delta_enabled"] =
+                QwenDecisionCore.cpu_setting(:octavian_delta)
+            result["cpu_final_query_enabled"] = QwenDecisionCore.cpu_setting(:final_query)
             result["cpu_final_token_only_enabled"] =
-                JeffClient.cpu_setting(:final_token_only)
-            result["cpu_simd_enabled"] = JeffClient.cpu_setting(:simd)
-            result["cpu_parallel_heads_enabled"] = JeffClient.cpu_setting(:parallel_heads)
+                QwenDecisionCore.cpu_setting(:final_token_only)
+            result["cpu_simd_enabled"] = QwenDecisionCore.cpu_setting(:simd)
+            result["cpu_parallel_heads_enabled"] =
+                QwenDecisionCore.cpu_setting(:parallel_heads)
             result["julia_worker_threads"] = Threads.nthreads(:default)
-            result["cpu_mlp_workspace_enabled"] = JeffClient.cpu_setting(:mlp_workspace)
-            result["cpu_delta_workspace_enabled"] = JeffClient.cpu_setting(:delta_workspace)
-            result["cpu_delta_chunk_size"] = JeffClient.cpu_delta_chunk_size()
-            result["cpu_delta_workers"] = JeffClient.cpu_delta_workers(backend.config)
+            result["cpu_mlp_workspace_enabled"] =
+                QwenDecisionCore.cpu_setting(:mlp_workspace)
+            result["cpu_delta_workspace_enabled"] =
+                QwenDecisionCore.cpu_setting(:delta_workspace)
+            result["cpu_delta_chunk_size"] = QwenDecisionCore.cpu_delta_chunk_size()
+            result["cpu_delta_workers"] =
+                QwenDecisionCore.cpu_delta_workers(backend.backbone.config)
             result["cpu_inplace_delta_rms_enabled"] =
-                JeffClient.cpu_setting(:inplace_delta_rms)
-            result["cpu_vector_math_enabled"] = JeffClient.cpu_setting(:vector_math)
-            result["cpu_accelerate_requested"] = JeffClient.cpu_setting(:accelerate)
+                QwenDecisionCore.cpu_setting(:inplace_delta_rms)
+            result["cpu_vector_math_enabled"] = QwenDecisionCore.cpu_setting(:vector_math)
+            result["cpu_accelerate_requested"] = QwenDecisionCore.cpu_setting(:accelerate)
             if result["cpu_accelerate_requested"]
                 result["accelerate_version"] = string(pkgversion(AppleAccelerate))
                 result["accelerate_threads"] = AppleAccelerate.get_num_threads()
             end
-            result["cpu_trim_padding_enabled"] = JeffClient.cpu_setting(:trim_padding)
+            result["cpu_trim_padding_enabled"] = QwenDecisionCore.cpu_setting(:trim_padding)
             result["cpu_computed_sequence_lengths"] = [
-                size(inputs["input_ids"], 2) - JeffClient.native_sequence_start(
-                    backend.embedding,
+                size(inputs["input_ids"], 2) - QwenDecisionCore.native_sequence_start(
+                    backend.backbone.embedding,
                     inputs["attention_mask"],
                     row,
                 ) + 1 for row in axes(inputs["input_ids"], 1)
@@ -166,8 +174,8 @@ function run_benchmark(args, profile, warmups = 2)
             result["metal_shape_workspaces_enabled"] =
                 get(ENV, "JEFF_METAL_SHAPE_WORKSPACES", "0") == "1"
             result["metal_computed_sequence_lengths"] = [
-                size(inputs["input_ids"], 2) - JeffClient.native_sequence_start(
-                    backend.embedding,
+                size(inputs["input_ids"], 2) - QwenDecisionCore.native_sequence_start(
+                    backend.backbone.embedding,
                     inputs["attention_mask"],
                     row,
                 ) + 1 for row in axes(inputs["input_ids"], 1)
@@ -175,9 +183,9 @@ function run_benchmark(args, profile, warmups = 2)
             batched_execution =
                 result["metal_batched_enabled"] &&
                 size(inputs["input_ids"], 1) > 1 &&
-                backend.config.key_dim <= 256 &&
-                backend.config.head_dim <= 4096 &&
-                size(backend.embedding, 1) <= 4096
+                backend.backbone.config.key_dim <= 256 &&
+                backend.backbone.config.head_dim <= 4096 &&
+                size(backend.backbone.embedding, 1) <= 4096
             result["metal_batched_execution"] = batched_execution
             if batched_execution
                 fill!(
@@ -227,10 +235,10 @@ function main(args = ARGS)
     length(positional) in 3:6 || error(
         "Usage: julia --project=tools tools/benchmark_inference.jl MODEL cpu|metal|onnx REFERENCE_JSON [CASE_INDEX] [SAMPLES] [OUTPUT_JSON] [--python-reference]",
     )
-    JeffClient.initialize_cpu!()
+    QwenDecisionCore.initialize_cpu!()
     if profile == :python_reference
         positional[2] == "cpu" || error("--python-reference is only supported for CPU.")
-        return JeffClient.with_cpu_settings(
+        return QwenDecisionCore.with_cpu_settings(
             :trim_padding => false,
             :final_query => false,
             :final_token_only => false,

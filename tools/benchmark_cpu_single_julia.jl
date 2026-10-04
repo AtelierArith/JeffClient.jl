@@ -1,3 +1,4 @@
+using QwenDecisionCore
 # Isolated diagnostic wrapper; production CPU defaults are unchanged.
 source = read(joinpath(@__DIR__, "benchmark_inference.jl"), String)
 source = replace(source, r"main\(\)\s*$" => "")
@@ -7,11 +8,11 @@ source = replace(
     "\"samples\" => length(trial.times)," => "\"times_ms\" => trial.times ./ 1e6, \"samples\" => length(trial.times),",
 )
 include_string(Main, source, abspath(joinpath(@__DIR__, "benchmark_inference.jl")))
-JeffClient.initialize_cpu!()
+QwenDecisionCore.initialize_cpu!()
 BLAS.set_num_threads(1)
 AppleAccelerate.set_num_threads(1)
 @assert AppleAccelerate.get_num_threads() == 1
-JeffClient.with_cpu_settings(
+QwenDecisionCore.with_cpu_settings(
     :trim_padding => false,
     :final_query => false,
     :final_token_only => false,

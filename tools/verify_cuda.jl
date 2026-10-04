@@ -1,5 +1,6 @@
 using CUDA, JeffClient, Test
-const JSON = JeffClient.JSON
+using QwenDecisionCore
+const JSON = QwenDecisionCore.JSON
 
 function main()
     length(ARGS) in (2, 3) ||

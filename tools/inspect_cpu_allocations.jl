@@ -2,8 +2,9 @@
 # AllocCheck 0.2.6 and Metal 1.11.1 require incompatible GPUCompiler versions.
 push!(LOAD_PATH, dirname(@__DIR__))
 using AllocCheck, JeffClient, LinearAlgebra
+using QwenDecisionCore
 import JSON
-JeffClient.cpu_setting(:accelerate) && (@eval import AppleAccelerate)
+QwenDecisionCore.cpu_setting(:accelerate) && (@eval import AppleAccelerate)
 
 function main()
     length(ARGS) == 2 ||
@@ -13,12 +14,13 @@ function main()
     sample = first(document isa AbstractDict ? document["cases"] : document)
     matrix(rows) = reduce(vcat, [permutedims(Int64.(row)) for row in rows])
     inputs = Dict(name => matrix(rows) for (name, rows) in sample["inputs"])
-    layer = first(backend.layers)
-    x = zeros(Float32, backend.config.hidden, 101)
+    layer = first(backend.backbone.layers)
+    x = zeros(Float32, backend.backbone.config.hidden, 101)
     gate = zeros(Float32, size(layer.mlp.gate, 2), size(x, 2))
     up = similar(gate)
-    cfg = backend.config
-    attention = first(l.attention for l in backend.layers if l.attention.kind == :delta)
+    cfg = backend.backbone.config
+    attention =
+        first(l.attention for l in backend.backbone.layers if l.attention.kind == :delta)
     q = zeros(Float32, cfg.key_dim, cfg.key_heads, 101)
     k = copy(q)
     v = zeros(Float32, cfg.value_dim, cfg.value_heads, 101)
@@ -26,13 +28,16 @@ function main()
     out = zeros(Float32, cfg.value_dim * cfg.value_heads, 101)
     beta = fill(0.5f0, cfg.value_heads, 101)
     decay = fill(-0.1f0, cfg.value_heads, 101)
-    owned = JeffClient.cpu_delta_worker_workspace(cfg, 101)
+    owned = QwenDecisionCore.cpu_delta_worker_workspace(cfg, 101)
     targets = (
         projection = (mul!, (gate, transpose(layer.mlp.gate), x)),
-        owned_gate = (JeffClient.cpu_owned_mlp_gate!, (gate, up)),
-        worker_workspace = (JeffClient.cpu_delta_worker_workspace, (backend.config, 101)),
+        owned_gate = (QwenDecisionCore.cpu_owned_mlp_gate!, (gate, up)),
+        worker_workspace = (
+            QwenDecisionCore.cpu_delta_worker_workspace,
+            (backend.backbone.config, 101),
+        ),
         recurrent_kernel = (
-            JeffClient.cpu_delta_recurrent_heads!,
+            QwenDecisionCore.cpu_delta_recurrent_heads!,
             (
                 1:cfg.value_heads,
                 out,

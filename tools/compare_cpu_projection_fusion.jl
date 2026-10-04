@@ -1,14 +1,15 @@
 using JeffClient, LinearAlgebra, BenchmarkTools, Test
+using QwenDecisionCore
 
 function separate!(outputs, weights, input)
     for (output, weight) in zip(outputs, weights)
-        JeffClient.cpu_projection!(output, weight, input)
+        QwenDecisionCore.cpu_projection!(output, weight, input)
     end
     return outputs
 end
 
 function fused_copy!(outputs, combined, weight, input)
-    JeffClient.cpu_projection!(combined, weight, input)
+    QwenDecisionCore.cpu_projection!(combined, weight, input)
     offset = 0
     for output in outputs
         copyto!(output, @view combined[(offset+1):(offset+size(output, 1)), :])
@@ -20,17 +21,22 @@ end
 function main()
     backend = NativeBackend(only(ARGS))
     BLAS.set_num_threads(1)
-    first_delta =
-        first(layer.attention for layer in backend.layers if layer.attention.kind == :delta)
+    first_delta = first(
+        layer.attention for
+        layer in backend.backbone.layers if layer.attention.kind == :delta
+    )
     groups = (
-        gate_up = (first(backend.layers).mlp.gate, first(backend.layers).mlp.up),
+        gate_up = (
+            first(backend.backbone.layers).mlp.gate,
+            first(backend.backbone.layers).mlp.up,
+        ),
         qkv_z = (first_delta.qkv, first_delta.z),
     )
-    JeffClient.with_cpu_settings(
+    QwenDecisionCore.with_cpu_settings(
         :parallel_projections => "1",
         :projection_thread_scope => "1",
     ) do
-        JeffClient.cpu_projection_scope() do
+        QwenDecisionCore.cpu_projection_scope() do
             for (name, weights) in pairs(groups), n in (1, 101, 256)
                 input = reshape(
                     sin.(Float32.(1:(size(first(weights), 1)*n))),
@@ -47,7 +53,7 @@ function main()
                         () -> fused_copy!(outputs, combined, combined_weight, input) :
                         (
                             mode == :direct ?
-                            () -> JeffClient.cpu_projection!(
+                            () -> QwenDecisionCore.cpu_projection!(
                                 combined,
                                 combined_weight,
                                 input,

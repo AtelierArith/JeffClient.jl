@@ -1,9 +1,11 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
+QwenDecisionCore = "fcbe74a4-32ac-465b-ade5-4db25fa89388"
 
 [sources]
 JeffClient = {path = ".."}
+QwenDecisionCore = {path = "../extern/QwenDecisionCore.jl"}
 
 [compat]
 Documenter = "1"

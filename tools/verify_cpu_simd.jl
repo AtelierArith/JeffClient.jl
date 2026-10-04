@@ -1,4 +1,5 @@
 using SIMD, JeffClient, Test
+using QwenDecisionCore
 @assert Base.get_extension(JeffClient, :JeffClientSIMDExt) !== nothing
 
 @testset "SIMD convolution versus ordered scalar reference" begin
@@ -13,8 +14,8 @@ using SIMD, JeffClient, Test
         end
         original = copy(input)
         actual = similar(expected)
-        JeffClient.with_cpu_settings(:simd => "1") do
-            JeffClient.cpu_convolution!(actual, input, weight)
+        QwenDecisionCore.with_cpu_settings(:simd => "1") do
+            QwenDecisionCore.cpu_convolution!(actual, input, weight)
         end
         @test actual == expected
         @test input == original

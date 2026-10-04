@@ -1,4 +1,5 @@
 using JeffClient, BenchmarkTools, LinearAlgebra, Statistics
+using QwenDecisionCore
 import AppleAccelerate, JSON
 
 function main()
@@ -10,7 +11,7 @@ function main()
     backend = NativeBackend(ARGS[1])
     BLAS.set_num_threads(8)
     for chunk in (64, 32, 16, 128), workers in (1, 2, 4, 8)
-        JeffClient.with_cpu_settings(
+        QwenDecisionCore.with_cpu_settings(
             :delta_chunk_size => string(chunk),
             :delta_workers => string(workers),
             :parallel_heads => "1",

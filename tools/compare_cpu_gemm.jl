@@ -12,8 +12,10 @@ function main()
         println("BLIS threads: ", BLISBLAS.get_num_threads())
     end
     println("BLAS: ", BLAS.get_config(), "; threads=", BLAS.get_num_threads())
-    for (name, weight) in
-        (("gate", first(backend.layers).mlp.gate), ("down", first(backend.layers).mlp.down))
+    for (name, weight) in (
+        ("gate", first(backend.backbone.layers).mlp.gate),
+        ("down", first(backend.backbone.layers).mlp.down),
+    )
         input = reshape(sin.(Float32.(1:(size(weight, 1)*101))), size(weight, 1), 101)
         output = zeros(Float32, size(weight, 2), 101)
         expected = transpose(weight) * input

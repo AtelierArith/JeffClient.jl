@@ -1,3 +1,6 @@
 [submodule "extern/jeff"]
 	path = extern/jeff
 	url = https://github.com/firelex/jeff
+[submodule "extern/QwenDecisionCore.jl"]
+	path = extern/QwenDecisionCore.jl
+	url = https://github.com/AtelierArith/QwenDecisionCore.jl.git

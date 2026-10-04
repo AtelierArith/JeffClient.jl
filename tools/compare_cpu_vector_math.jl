@@ -1,4 +1,5 @@
 using JeffClient, LoopVectorization, BenchmarkTools
+using QwenDecisionCore
 @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 
 # Algebraic experiment inspired by NNlib.sigmoid_fast. Not a replacement for
@@ -14,9 +15,9 @@ function main()
     for width in (3584, 6144)
         input = reshape(0.1f0 .+ sin.(Float32.(1:(width*101))), width, 101)
         for enabled in ("0", "1")
-            JeffClient.with_cpu_settings(:portable_vector_math => enabled) do
+            QwenDecisionCore.with_cpu_settings(:portable_vector_math => enabled) do
                 trial =
-                    @benchmark JeffClient.native_cpu_silu!(x) setup=(x=copy($input)) evals=1 samples=50
+                    @benchmark QwenDecisionCore.native_cpu_silu!(x) setup=(x=copy($input)) evals=1 samples=50
                 estimate = median(trial)
                 println(
                     "width=",

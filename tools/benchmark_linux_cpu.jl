@@ -25,6 +25,7 @@ if implementation == "python"
 import inspect
 import torch
 import transformers.models.qwen3_5.modeling_qwen3_5 as qwen
+using QwenDecisionCore
 torch.set_num_interop_threads(1)
 for name in ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule"):
     original = inspect.unwrap(getattr(qwen, name))
@@ -88,9 +89,9 @@ elseif implementation == "julia"
     include_string(Main, source, joinpath(@__DIR__, "benchmark_inference.jl"))
     record = Base.invokelatest() do
         Threads.nthreads(:default) == budget || error("Julia thread budget differs.")
-        JeffClient.initialize_cpu!()
+        QwenDecisionCore.initialize_cpu!()
         BLAS.set_num_threads(1)
-        JeffClient.with_cpu_settings(
+        QwenDecisionCore.with_cpu_settings(
             :trim_padding => false,
             :final_query => false,
             :final_token_only => false,

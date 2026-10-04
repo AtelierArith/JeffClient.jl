@@ -1,5 +1,6 @@
 # Equal-work GPU diagnostic. All positions reach the final residual/RMS.
 using JeffClient
+using QwenDecisionCore
 import Metal
 
 Metal.functional() || error("A functional Apple GPU is required.")
@@ -17,8 +18,8 @@ end
 extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
 source_path = joinpath(@__DIR__, "..", "ext", "metal_normalization.jl")
 source = read(source_path, String)
-start = findfirst("function JeffClient.native_hidden_forward(", source)
-stop = findnext("function JeffClient.native_rms(", source, last(start))
+start = findfirst("function QwenDecisionCore.native_hidden_forward(", source)
+stop = findnext("function QwenDecisionCore.native_rms(", source, last(start))
 method_source = source[first(start):prevind(source, first(stop))]
 tail = findfirst("    # The last layer needs only the readout column", method_source)
 tail === nothing && error("Metal reference adapter no longer matches the source.")

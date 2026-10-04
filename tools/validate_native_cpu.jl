@@ -1,6 +1,7 @@
 using JeffClient, LinearAlgebra
+using QwenDecisionCore
 import JSON
-if JeffClient.cpu_setting(:accelerate)
+if QwenDecisionCore.cpu_setting(:accelerate)
     import AppleAccelerate
 end
 BLAS.set_num_threads(8)

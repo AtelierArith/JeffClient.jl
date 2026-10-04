@@ -1,4 +1,5 @@
 using JeffClient
+using QwenDecisionCore
 using InteractiveUtils
 import Cthulhu
 import JSON
@@ -11,15 +12,20 @@ const INSPECTION_TARGETS =
 function inspection_target(target, backend, inputs)
     target == "logits" && return logits, (backend, inputs)
     extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
-    hidden = JeffClient.native_gather(backend.embedding, vec(inputs["input_ids"][1, :]))
+    hidden = QwenDecisionCore.native_gather(
+        backend.backbone.embedding,
+        vec(inputs["input_ids"][1, :]),
+    )
     mask = vec(inputs["attention_mask"][1, :])
-    cfg = backend.config
-    full = first(layer for layer in backend.layers if layer.attention.kind == :full)
-    delta = first(layer for layer in backend.layers if layer.attention.kind == :delta)
+    cfg = backend.backbone.config
+    full =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :full)
+    delta =
+        first(layer for layer in backend.backbone.layers if layer.attention.kind == :delta)
     target == "full" &&
-        return JeffClient.full_attention, (full.attention, hidden, mask, cfg)
+        return QwenDecisionCore.full_attention, (full.attention, hidden, mask, cfg)
     target == "delta" &&
-        return JeffClient.delta_attention, (delta.attention, hidden, mask, cfg)
+        return QwenDecisionCore.delta_attention, (delta.attention, hidden, mask, cfg)
     target == "rope" && return extension.rope_tables, (hidden, cfg, size(hidden, 2))
     if target == "submit"
         weight = delta.attention.qkv

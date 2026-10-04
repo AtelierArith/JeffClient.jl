@@ -1,9 +1,10 @@
 using JeffClient, LinearAlgebra, Statistics
+using QwenDecisionCore
 import JSON
-if JeffClient.cpu_setting(:accelerate)
+if QwenDecisionCore.cpu_setting(:accelerate)
     import AppleAccelerate
 end
-if JeffClient.cpu_setting(:portable_vector_math)
+if QwenDecisionCore.cpu_setting(:portable_vector_math)
     import LoopVectorization
     @assert Base.get_extension(JeffClient, :JeffClientLoopVectorizationExt) !== nothing
 end
@@ -18,13 +19,12 @@ function phase_layer(
     final,
     delta_projections = nothing,
 )
-    pre = @timed JeffClient.native_rms(hidden, layer.input_norm, cfg.eps)
+    pre = @timed QwenDecisionCore.native_rms(hidden, layer.input_norm, cfg.eps)
     attention = @timed if layer.attention.kind == :full
         final ?
-        JeffClient.cpu_final_full_attention(layer.attention, pre.value, mask, cfg) :
-        JeffClient.full_attention(layer.attention, pre.value, mask, cfg)
+        QwenDecisionCore.cpu_final_full_attention(layer.attention, pre.value, mask, cfg) : QwenDecisionCore.full_attention(layer.attention, pre.value, mask, cfg)
     else
-        JeffClient.delta_attention(
+        QwenDecisionCore.delta_attention(
             layer.attention,
             pre.value,
             mask,
@@ -35,47 +35,49 @@ function phase_layer(
     end
     post = @timed if final
         residual = @views hidden[:, end:end] .+ attention.value[:, end:end]
-        (residual, JeffClient.native_rms(residual, layer.post_norm, cfg.eps))
+        (residual, QwenDecisionCore.native_rms(residual, layer.post_norm, cfg.eps))
     else
-        JeffClient.native_residual_rms(hidden, attention.value, layer.post_norm, cfg.eps)
+        QwenDecisionCore.native_residual_rms(hidden, attention.value, layer.post_norm, cfg.eps)
     end
     residual, normalized = post.value
     gate, up = mlp_buffers
     projections = @timed begin
-        JeffClient.cpu_projection!(gate, layer.mlp.gate, normalized)
-        JeffClient.cpu_projection!(up, layer.mlp.up, normalized)
+        QwenDecisionCore.cpu_projection!(gate, layer.mlp.gate, normalized)
+        QwenDecisionCore.cpu_projection!(up, layer.mlp.up, normalized)
     end
-    activation = @timed JeffClient.cpu_owned_mlp_gate!(gate, up)
-    fused = JeffClient.cpu_setting(:mlp_residual_fusion)
+    activation = @timed QwenDecisionCore.cpu_owned_mlp_gate!(gate, up)
+    fused = QwenDecisionCore.cpu_setting(:mlp_residual_fusion)
     down = @timed if fused
-        JeffClient.cpu_projection!(residual, layer.mlp.down, activation.value, 1.0f0)
+        QwenDecisionCore.cpu_projection!(residual, layer.mlp.down, activation.value, 1.0f0)
     else
-        JeffClient.native_linear(layer.mlp.down, activation.value)
+        QwenDecisionCore.native_linear(layer.mlp.down, activation.value)
     end
     added = @timed if fused
         residual
     else
-        JeffClient.native_residual_add!(residual, down.value)
+        QwenDecisionCore.native_residual_add!(residual, down.value)
     end
     phases = (pre, attention, post, projections, activation, down, added)
     return added.value, [p.time for p in phases], [p.bytes for p in phases]
 end
 
 function phase_pass(backend, ids, mask)
-    return JeffClient.cpu_projection_scope() do
+    return QwenDecisionCore.cpu_projection_scope() do
         phase_pass_unscoped(backend, ids, mask)
     end
 end
 
 function phase_pass_unscoped(backend, ids, mask)
-    cfg = backend.config
-    hidden = JeffClient.native_gather(backend.embedding, ids)
-    workspace = JeffClient.cpu_mlp_workspace(backend.layers, length(ids))
-    delta = JeffClient.cpu_delta_workspace(cfg, length(ids))
-    projections = JeffClient.cpu_delta_projection_workspace(cfg, length(ids))
+    cfg = backend.backbone.config
+    hidden = QwenDecisionCore.native_gather(backend.backbone.embedding, ids)
+    workspace = QwenDecisionCore.cpu_mlp_workspace(backend.backbone.layers, length(ids))
+    delta = QwenDecisionCore.cpu_delta_workspace(cfg, length(ids))
+    projections = QwenDecisionCore.cpu_delta_projection_workspace(cfg, length(ids))
     records = []
-    for (i, layer) in enumerate(backend.layers)
-        final = i == length(backend.layers) && JeffClient.cpu_setting(:final_token_only)
+    for (i, layer) in enumerate(backend.backbone.layers)
+        final =
+            i == length(backend.backbone.layers) &&
+            QwenDecisionCore.cpu_setting(:final_token_only)
         buffers = final ? workspace.final : workspace.full
         hidden, times, bytes =
             phase_layer(layer, hidden, mask, cfg, buffers, delta, final, projections)
@@ -84,21 +86,25 @@ function phase_pass_unscoped(backend, ids, mask)
             (layer = i, kind = layer.attention.kind, ms = times .* 1000, bytes = bytes),
         )
     end
-    scores = JeffClient.native_linear(
+    scores = QwenDecisionCore.native_linear(
         backend.readout,
-        JeffClient.native_rms(hidden[:, end:end], backend.final_norm, cfg.eps),
+        QwenDecisionCore.native_rms(
+            hidden[:, end:end],
+            backend.backbone.final_norm,
+            cfg.eps,
+        ),
     )
     return scores, records
 end
 
 function main()
     length(ARGS) == 2 || error("Usage: time_cpu_phases.jl CHECKPOINT REFERENCE")
-    JeffClient.initialize_cpu!()
+    QwenDecisionCore.initialize_cpu!()
     backend = NativeBackend(ARGS[1])
     sample = only(JSON.parsefile(ARGS[2]))
     ids = Int64.(only(sample["inputs"]["input_ids"]))
     mask = Int64.(only(sample["inputs"]["attention_mask"]))
-    start = JeffClient.cpu_setting(:trim_padding) ? findfirst(!iszero, mask) : 1
+    start = QwenDecisionCore.cpu_setting(:trim_padding) ? findfirst(!iszero, mask) : 1
     ids, mask = ids[start:end], mask[start:end]
     expected = Float32.(only(sample["logits"]))
     phase_pass(backend, ids, mask)

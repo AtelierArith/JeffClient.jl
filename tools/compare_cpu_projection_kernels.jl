@@ -35,10 +35,11 @@ end
 function main()
     backend = NativeBackend(only(ARGS))
     BLAS.set_num_threads(1)
-    delta = first(l.attention for l in backend.layers if l.attention.kind == :delta)
+    delta =
+        first(l.attention for l in backend.backbone.layers if l.attention.kind == :delta)
     for (name, original) in (
-            ("gate", first(backend.layers).mlp.gate),
-            ("down", first(backend.layers).mlp.down),
+            ("gate", first(backend.backbone.layers).mlp.gate),
+            ("down", first(backend.backbone.layers).mlp.down),
             ("qkv", delta.qkv),
         ),
         materialize in (false, true)
