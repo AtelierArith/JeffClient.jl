@@ -13,11 +13,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1.13'
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Install documentation dependencies
         run: julia --color=yes --project=docs -e 'using Pkg; Pkg.instantiate(; workspace=true)'
       - name: Build and deploy documentation
