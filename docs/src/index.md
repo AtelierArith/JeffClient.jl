@@ -17,15 +17,15 @@ required by this inference API. ONNX Runtime itself is a native library.
 
 The shared infrastructure lives in
 [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl), a
-Git submodule under `extern/QwenDecisionCore.jl`: the Qwen3.5 / Qwen3.8 backbone
+separate package, fetched from GitHub through the `[sources]` table of
+`Project.toml`: the Qwen3.5 / Qwen3.8 backbone
 forward pass, the safetensors reader, the Hugging Face checkpoint resolver, the
 automatic CPU policy, and the Metal / CUDA / Accelerate / Octavian / SIMD
 extensions. JeffClient adds only the Jeff-specific parts: the
 `decision_config.json` / `readout.safetensors` bundle, the linear readout and
 the ONNX export backend. This mirrors
-[KevClient.jl](https://github.com/AtelierArith/KevClient.jl). Clone with
-`git clone --recurse-submodules`, or initialise the submodule afterwards with
-`git submodule update --init --recursive`.
+[KevClient.jl](https://github.com/AtelierArith/KevClient.jl). No submodule is
+needed; `Pkg.instantiate()` clones it.
 
 ## Documentation
 

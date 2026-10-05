@@ -9,22 +9,63 @@ and reference tools, through PythonCall.jl.
 
 The shared infrastructure lives in
 [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl), a
-Git submodule under `extern/QwenDecisionCore.jl`: the Qwen3.5 / Qwen3.8 backbone
-forward pass, the safetensors reader, the Hugging Face checkpoint resolver, the
+separate package: the Qwen3.5 / Qwen3.8 backbone forward pass, the safetensors reader, the Hugging Face checkpoint resolver, the
 automatic CPU policy and the Metal / CUDA / Accelerate / Octavian / SIMD
 extensions. JeffClient is a thin client that adds only what is Jeff-specific:
 the `decision_config.json` / `readout.safetensors` bundle, the linear readout and
 the ONNX export backend. This mirrors
 [KevClient.jl](https://github.com/AtelierArith/KevClient.jl).
 
-Neither package is registered on the General registry, so clone with the
-submodule:
+It is not registered on the General registry. `Project.toml` points at
+`https://github.com/AtelierArith/QwenDecisionCore.jl.git` through `[sources]`, so
+`Pkg.instantiate()` clones it automatically and no submodule is involved.
 
-```bash
-git clone --recurse-submodules https://github.com/AtelierArith/JeffClient.jl.git
-# in an existing checkout:
-git submodule update --init --recursive
-```
+## Setup guide
+
+Requirements: Julia 1.13 and Git. The Metal path additionally needs a Mac with
+Apple Silicon (arm64 macOS).
+
+1. Install Julia through [juliaup](https://github.com/JuliaLang/juliaup):
+
+   ```bash
+   curl -fsSL https://install.julialang.org | sh   # then reopen the terminal
+   juliaup add 1.13 && juliaup default 1.13
+   ```
+
+2. Clone the repository. `extern/jeff` is the only submodule; it holds the
+   Python reference used by the tools and is not needed for inference.
+
+   ```bash
+   git clone https://github.com/AtelierArith/JeffClient.jl.git
+   cd JeffClient.jl
+   # optional, for the Python reference tools and reference tests:
+   git submodule update --init extern/jeff
+   ```
+
+3. Install the dependencies. This fetches QwenDecisionCore.jl from GitHub, so
+   internet access is required.
+
+   ```bash
+   julia --project -e 'using Pkg; Pkg.instantiate()'
+   ```
+
+   For Metal, benchmarks and profiling, instantiate the tools workspace instead:
+
+   ```bash
+   julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+   ```
+
+4. Run the demo. The first run downloads the pinned checkpoint (about 1.7 GB):
+
+   ```bash
+   julia --threads=8 --project examples/native_inference.jl
+   ```
+
+5. Optionally verify the installation with `Pkg.test()` (see [Tests](#tests)).
+
+If instantiation fails with `empty intersection between QwenDecisionCore` or
+cannot find the package, delete the stale `Manifest.toml` files (they are
+git-ignored) and instantiate again.
 
 ## Quick start: native Julia on CPU
 

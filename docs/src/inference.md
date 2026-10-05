@@ -149,7 +149,7 @@ Native CUDA does not require cuDNN or an ONNX export.
 
 The text-only Qwen3.5 forward pass lives in
 [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl)
-(`extern/QwenDecisionCore.jl`) and loads source safetensors directly: embeddings,
+and loads source safetensors directly: embeddings,
 partial RoPE, grouped full attention, Gated DeltaNet, RMS normalization and the
 SiLU MLP are implemented in Julia. JeffClient adds the trained readout and reads
 `decision_config.json`. No ONNX export or Python is needed for this inference

@@ -13,7 +13,7 @@ ONNXRunTime = "e034b28e-924e-41b2-b98f-d2bbeb830c6a"
 QwenDecisionCore = "fcbe74a4-32ac-465b-ade5-4db25fa89388"
 
 [sources]
-QwenDecisionCore = {path = "extern/QwenDecisionCore.jl"}
+QwenDecisionCore = {rev = "main", url = "https://github.com/AtelierArith/QwenDecisionCore.jl.git"}
 
 [compat]
 JSON = "1.10.0"

@@ -2,7 +2,7 @@
 
 > Architecture note (2026-10-04). The shared infrastructure now lives in
 > [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl), a
-> Git submodule under `extern/QwenDecisionCore.jl`: the backbone forward pass,
+> separate package, fetched by URL through `[sources]`: the backbone forward pass,
 > the safetensors reader, the Hugging Face resolver, the CPU policy and the
 > accelerator extensions. JeffClient keeps only what is Jeff-specific — the
 > `decision_config.json` / `readout.safetensors` bundle, the linear readout and

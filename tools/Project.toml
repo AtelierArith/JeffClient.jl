@@ -19,7 +19,7 @@ TypedSyntax = "d265eb64-f81a-44ad-a842-4247ee1503de"
 
 [sources]
 JeffClient = {path = ".."}
-QwenDecisionCore = {path = "../extern/QwenDecisionCore.jl"}
+QwenDecisionCore = {url = "https://github.com/AtelierArith/QwenDecisionCore.jl.git"}
 
 [compat]
 BLISBLAS = "0.2.0"

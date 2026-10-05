@@ -5,7 +5,7 @@ QwenDecisionCore = "fcbe74a4-32ac-465b-ade5-4db25fa89388"
 
 [sources]
 JeffClient = {path = ".."}
-QwenDecisionCore = {path = "../extern/QwenDecisionCore.jl"}
+QwenDecisionCore = {url = "https://github.com/AtelierArith/QwenDecisionCore.jl.git"}
 
 [compat]
 Documenter = "1"
