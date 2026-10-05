@@ -22,7 +22,7 @@ function report_target(name, f, args...)
     if JET.JET_AVAILABLE
         jet = JET.@report_opt target_modules=(
             JeffClient,
-            Base.get_extension(JeffClient, :JeffClientMetalExt),
+            Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt),
         ) f(args...)
         show(stdout, MIME"text/plain"(), jet)
         println()

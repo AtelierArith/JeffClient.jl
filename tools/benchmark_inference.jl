@@ -193,7 +193,7 @@ function run_benchmark(args, profile, warmups = 2)
                     maximum(result["metal_computed_sequence_lengths"]),
                 )
             end
-            extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+            extension = Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt)
             isdefined(extension, :metal_pool_stats) &&
                 (result["metal_pool"] = extension.metal_pool_stats())
             # A post-trial snapshot depends on when finalizers have run.

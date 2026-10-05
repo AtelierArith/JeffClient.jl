@@ -418,7 +418,7 @@ end
 function main()
     Metal.functional() || error("A functional Apple GPU is required.")
     Metal.allowscalar(false)
-    extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    extension = Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt)
     if ARGS == ["batch"]
         verify_batched_causal_depthwise(extension)
         verify_batched_delta_recurrent(extension)

@@ -11,7 +11,7 @@ const INSPECTION_TARGETS =
 
 function inspection_target(target, backend, inputs)
     target == "logits" && return logits, (backend, inputs)
-    extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    extension = Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt)
     hidden = QwenDecisionCore.native_gather(
         backend.backbone.embedding,
         vec(inputs["input_ids"][1, :]),

@@ -143,7 +143,7 @@ function main()
     full =
         first(layer for layer in backend.backbone.layers if layer.attention.kind == :full)
     mixed = QwenDecisionCore.native_linear(delta.attention.qkv, hidden)
-    extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
+    extension = Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt)
     cfg = backend.backbone.config
     masked = hidden .* reshape(prepared_mask.device, 1, :)
     delta_mixed = QwenDecisionCore.causal_depthwise(

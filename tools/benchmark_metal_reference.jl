@@ -15,8 +15,9 @@ for flag in (
 )
     ENV[flag] = "0"
 end
-extension = Base.get_extension(JeffClient, :JeffClientMetalExt)
-source_path = joinpath(@__DIR__, "..", "ext", "metal_normalization.jl")
+extension = Base.get_extension(QwenDecisionCore, :QwenDecisionCoreMetalExt)
+extension === nothing && error("QwenDecisionCoreMetalExt was not loaded.")
+source_path = joinpath(pkgdir(QwenDecisionCore), "ext", "metal_normalization.jl")
 source = read(source_path, String)
 start = findfirst("function QwenDecisionCore.native_hidden_forward(", source)
 stop = findnext("function QwenDecisionCore.native_rms(", source, last(start))

@@ -1,5 +1,13 @@
 # パフォーマンスの知見
 
+## 2026-10-05: Apple M4 の Metal 経路（DeltaNet recurrence の load 律速）
+
+- M4（Julia1.13.1/Metal1.11.1、F32、parcel L256、全256token、readout/CPU score返却込み、20samples×1process、host非隔離）で、Metal既定 median204.0ms（p95 220.2）はCPU8thread 191.8msと同等。数値は両者とも独立参照に対し最大logit誤差約7e-6。
+- 段階別測定（`tools/benchmark_stages.jl`）で DeltaNet recurrence が1層4.6ms（18層で約83ms）。state演算を外して load と store だけにしても4.2msだったため、value row ごとの SIMD group が同じ key/query を毎トークン再読込する load 律速。rows(1/4/16)や exp 事前計算では変わらない。
+- 1 SIMD group が4 value row を持ち key/query を共有するカーネルで、単体4.64→約2.1–2.5ms、全forward median204.0→159.6ms（誤差不変、単体出力は完全一致）。QwenDecisionCore の PR #1（branch `delta-recurrent-multirow`）。単体時間は実行間で2.1–3.6msと揺れた。8行/groupは入れ子tupleでLLVM inlinerがbus errorになり未検証。M2 Maxの約94msには未達で、他のDeltaNet段階が残る。
+- `tools/` の旧拡張名 `JeffClientMetalExt` と `../ext/` 参照を `QwenDecisionCoreMetalExt` と `pkgdir(QwenDecisionCore)` に修正（`benchmark_metal_reference.jl` ほか5本）。QwenDecisionCoreはsubmoduleをやめ、`[sources]` のGit URLで取得する。
+- 検証用スクリプトは作業中のscratchpadにあり、リポジトリには置いていない。
+
 ## 2026-10-04: QwenDecisionCore.jl への共通化
 
 - ユーザー指定で、KevClient.jl と同じ「薄いクライアント」構成へ移行。共有コア（backbone forward、safetensors reader/writer、Hub resolver、CPU policy、加速拡張、Choice/Noul/Score）を独立リポジトリ `AtelierArith/QwenDecisionCore.jl` に切り出し、JeffClient は `extern/QwenDecisionCore.jl` サブモジュール経由で依存する。KevClient.jl 側も `packages/` を同リポジトリのサブモジュールに置換した。
