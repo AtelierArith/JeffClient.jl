@@ -12,13 +12,22 @@
 #   --samples N        timed forwards (default: 30)
 #   --warmups N        untimed forwards before timing (default: 5)
 #   --gpu N            CUDA device index (default: 0)
+#   --accelerate       Apple silicon CPU only: load AppleAccelerate and forward
+#                      BLAS to Accelerate before the model loads (opt-in fast
+#                      path; without it the default BLAS is used)
 #   --output FILE      also write the JSON record to FILE
-const USAGE = "Usage: benchmark.jl cpu|metal|cuda [--checkpoint DIR] [--reference FILE] [--case N] [--samples N] [--warmups N] [--gpu N] [--output FILE]"
+const USAGE = "Usage: benchmark.jl cpu|metal|cuda [--checkpoint DIR] [--reference FILE] [--case N] [--samples N] [--warmups N] [--gpu N] [--accelerate] [--output FILE]"
 
-const DEVICE = isempty(ARGS) ? error(USAGE) : Symbol(ARGS[1])
+const ACCELERATE = "--accelerate" in ARGS
+const CLI = [arg for arg in ARGS if arg != "--accelerate"]
+const DEVICE = isempty(CLI) ? error(USAGE) : Symbol(CLI[1])
 DEVICE in (:cpu, :metal, :cuda) || error(USAGE)
 DEVICE == :metal && import Metal
 DEVICE == :cuda && import CUDA
+if ACCELERATE
+    Sys.isapple() || error("--accelerate is only available on macOS")
+    import AppleAccelerate
+end
 
 using JeffClient, LinearAlgebra, Statistics
 import QwenDecisionCore
@@ -111,6 +120,7 @@ function main(args)
         "julia" => string(VERSION),
         "threads" => Threads.nthreads(),
         "blas_threads" => BLAS.get_num_threads(),
+        "apple_accelerate" => ACCELERATE,
         "precision" => "Float32",
         "reference" => abspath(opts["reference"]),
         "batch" => size(inputs["input_ids"], 1),
@@ -143,4 +153,4 @@ function main(args)
     return record
 end
 
-main(ARGS[2:end])
+main(CLI[2:end])

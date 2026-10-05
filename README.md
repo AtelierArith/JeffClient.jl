@@ -147,11 +147,23 @@ any logit differs beyond tolerance.
 
 ## CPU threads
 
-CPU inference chooses its configuration automatically: Accelerate on Apple
-Silicon, portable vector math and Julia-parallel projections elsewhere. Start
-Julia with several threads (`--threads=8`); with a single Julia thread the
-fused task-parallel kernels are disabled and the forward is several times
-slower.
+CPU inference selects its platform configuration automatically. On Apple
+silicon the Accelerate fast path is opt-in: add `AppleAccelerate` to your
+environment and `using AppleAccelerate` before the forward (`QwenDecisionCore`'s
+extension forwards BLAS to Accelerate in either load order). The `tools`
+environment already includes it, and `tools/benchmark.jl` exposes
+`--accelerate`; without it Julia uses the default BLAS (OpenBLAS).
+
+> **Apple silicon note.** Accelerate used to be enabled automatically. Since
+> `AppleAccelerate` became an opt-in weak dependency, a plain `using JeffClient`
+> runs the slower default BLAS. If you want the previous Accelerate speed, add
+> `AppleAccelerate` to your project and `using AppleAccelerate`, or run with
+> `--project=tools`.
+
+The portable vector math and Julia-parallel projections run on every platform,
+including Linux. Start Julia with several threads (`--threads=8`); with a single
+Julia thread the fused task-parallel kernels are disabled and the forward is
+several times slower.
 
 ## Tests
 

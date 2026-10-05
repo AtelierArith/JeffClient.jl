@@ -94,12 +94,21 @@ pinned to the verified Metal.jl 1.11.1.
 
 ## CPU
 
-CPU execution picks its platform configuration automatically: Accelerate on
-Apple Silicon macOS, portable vector math and Julia-parallel projections
-elsewhere. The BLAS thread count is set when QwenDecisionCore loads, which
-also affects other BLAS users in the process. Start Julia with several
-threads (`--threads=8`); a single thread is several times slower for this
-hybrid model.
+CPU execution picks its platform configuration automatically. On Apple silicon
+macOS the Accelerate fast path is opt-in: add `AppleAccelerate` to your
+environment and `using AppleAccelerate` before the forward (the `tools`
+environment already includes it). `QwenDecisionCore`'s extension forwards BLAS
+to Accelerate in either load order; without it the portable vector math and
+Julia-parallel projections run, including on Linux.
+
+Apple silicon users who relied on the previous automatic Accelerate path must
+now opt in: a plain `using JeffClient` uses the default BLAS (OpenBLAS). Add
+`AppleAccelerate` and load it, or run with `--project=tools` and pass
+`--accelerate` to `tools/benchmark.jl`.
+
+The BLAS thread count is set when QwenDecisionCore loads, which also affects
+other BLAS users in the process. Start Julia with several threads
+(`--threads=8`); a single thread is several times slower for this hybrid model.
 
 ## Limits
 

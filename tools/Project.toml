@@ -1,4 +1,5 @@
 [deps]
+AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
@@ -14,6 +15,7 @@ JeffClient = {path = ".."}
 QwenDecisionCore = {rev = "main", url = "https://github.com/AtelierArith/QwenDecisionCore.jl.git"}
 
 [compat]
+AppleAccelerate = "=0.7.0"
 CUDA = "6"
 JSON = "1"
 LinearAlgebra = "1.13"
