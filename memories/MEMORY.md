@@ -1,5 +1,15 @@
 # パフォーマンスの知見
 
+## 2026-10-05: M4 Metal の段階別内訳と trim padding（続き）
+
+- 単発 `Metal.@sync` の段階別測定は、同期1回で約0.5–1ms の遅延を含み過大（6144×256の `x .+ 1` が0.55–1.8ms）。同じ演算を20回流して1回同期し割る方式（amortized）に切り替えた。以前の `tools/benchmark_stages.jl` の表はこの遅延込みで、足し合わせの根拠にしない。
+- amortized内訳（全256token、1層）: DeltaNet attention 4.72ms（matmul 2.28、recurrent 1.94、causal conv 0.44、Q/K整形0.14、他0.08）、MLP 2.31ms、full attention 2.03ms。18/24/6層で約85/55/12ms、合計約152msは実測155msと一致。
+- matmulはqkv/z/out/MLPとも約2.4–2.5TFLOPSで、MPS直呼びの大行列（4096³、2.7TFLOPS）の実効上限にほぼ届く。MLPのスラックは1層約0.24ms（24層で約6ms）のため、gate/up/downのMPSGraph融合は効果が小さいと判断し未実施。F16は数値を崩すので使わない。
+- `QDC_METAL_TRIM_PADDING=1`（有効101token）で median155.1→73.4ms（他の任意フラグ全ONで70.4ms）、最大logit誤差7.63e-6（base6.68e-6）。CPU8thread 191.8msの約2.6倍。既定はまだ0（opt-in）。既定化には padding・系列長・同長で異なるmask・GC後再利用の検証が必要で、未判断。
+- recurrentの追加試行は効果なし: `air.simd_sum.f32`（llvmcall、動作確認済）への置換は1.94→1.89msのみ（約3%）、次トークンのprefetchはレジスタ増で1.89→2.24msに悪化。どちらも未採用。GPUプロファイラ（Xcode）がないため律速要因は未特定。
+- recurrent の部品除去（amortized、M4、L256）: 全部入り2.27ms、出力store無し1.49ms、reduction無し2.13ms、query load無し1.82ms。出力storeが支配的で、lane1だけが4行を単発4Bで書いていた。4行結果を lane1–4 が1 storeで書く版で1.94→1.71ms（出力は完全一致）、end-to-endは全256token 157.7/156.6→155.4/152.0ms、trim 71.9/73.1→71.5/69.6ms。threadgroup内SIMD group数は4が最良（2/4/8/16/32=1.73/1.71/1.84/2.08/2.27ms）。QwenDecisionCore PR #4。単体では closure/入れ子tupleを使うと LLVM inliner が bus error になるため、行処理は `@inline` 関数に分けて書く。
+- causal depthwise をレジスタ上で4tapスライドさせる版は出力一致、end-to-end約1–3%（全256token 159.5/157.2→153.9/155.4ms、trim 73.4/72.9→71.9/71.7ms、交互A/B）。QwenDecisionCore PR #2。host非隔離で変動大（p95最大221ms）。
+
 ## 2026-10-05: Apple M4 の Metal 経路（DeltaNet recurrence の load 律速）
 
 - M4（Julia1.13.1/Metal1.11.1、F32、parcel L256、全256token、readout/CPU score返却込み、20samples×1process、host非隔離）で、Metal既定 median204.0ms（p95 220.2）はCPU8thread 191.8msと同等。数値は両者とも独立参照に対し最大logit誤差約7e-6。
