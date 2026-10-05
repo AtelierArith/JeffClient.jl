@@ -5,6 +5,41 @@ Qwen3.5 on CPU, Apple GPU (Metal.jl) and NVIDIA GPU (CUDA). Inference accepts pr
 tensors; text tokenization is not implemented. Python is needed only for export
 and reference tools, through PythonCall.jl.
 
+## Minimal example
+
+After the [setup](#setup-guide), run this from the repository root with
+`julia --threads=8 --project`. The first run downloads the pinned checkpoint
+(about 1.7 GB). It classifies a bundled, pre-tokenized parcel inquiry on CPU:
+
+```julia
+using JeffClient
+import JSON
+
+sample = JSON.parsefile("examples/data/parcel.json")
+checkpoint = resolve_checkpoint(sample["model"]; revision = sample["revision"])
+backend = NativeBackend(checkpoint)  # device = :metal needs `import Metal`
+
+criteria = sample["question"]["criteria"]
+question = ChoiceQuestion(
+    ["refund" => criteria["refund"], "delivery" => criteria["delivery"]];
+    instructions = sample["question"]["instructions"],
+)
+# Prepared token tensors; text tokenization is not implemented.
+inputs = Dict(
+    name => reduce(vcat, [permutedims(Int64.(row)) for row in rows]) for
+    (name, rows) in sample["inputs"]
+)
+
+result = decide(backend, inputs, question)
+result.choice        # "delivery"
+result.probabilities # refund ≈ 0.0034, delivery ≈ 0.9966
+result.confidence    # ≈ 0.9931
+```
+
+For Metal, use `--project=tools`, `import Metal` and
+`NativeBackend(checkpoint; device = :metal)`; see
+[Apple GPU (Metal)](#apple-gpu-metal).
+
 ## Architecture
 
 The shared infrastructure lives in
