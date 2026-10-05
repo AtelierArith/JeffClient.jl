@@ -1,7 +1,7 @@
 # JeffClient.jl
 
 Native Julia inference for [Jeff](https://github.com/firelex/jeff), running
-Qwen3.5 on CPU and Apple GPU through Metal.jl. Inference accepts prepared token
+Qwen3.5 on CPU, Apple GPU (Metal.jl) and NVIDIA GPU (CUDA). Inference accepts prepared token
 tensors; text tokenization is not implemented. Python is needed only for export
 and reference tools, through PythonCall.jl.
 
@@ -126,7 +126,19 @@ julia --project=tools examples/metal_inference.jl CHECKPOINT_DIRECTORY
 
 This executes the same real-checkpoint demo on an Apple GPU and prints
 `Device: metal`. It shares the CPU demo's model cache; Python and ONNX export are
-not required. The first run compiles GPU kernels, so startup is longer.
+not required. The first run compiles GPU kernels, so startup is longer (about
+30 s on an Apple M4, Julia 1.13.1, Metal.jl 1.11.1).
+
+To check the Metal numerics against an independent PyTorch reference (this needs
+the `extern/jeff` submodule and the Python tools environment):
+
+```bash
+julia --project=tools tools/build_metal_reference.jl CHECKPOINT_DIRECTORY reference.json
+julia --project=tools tools/verify_metal.jl CHECKPOINT_DIRECTORY reference.json
+```
+
+It runs padded and mixed-length cases twice with a GC between cases and fails if
+any logit differs beyond tolerance.
 
 ### Optimized CPU execution
 
