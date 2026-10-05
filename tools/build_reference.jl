@@ -2,7 +2,7 @@ include("python_env.jl")
 using PythonCall
 
 length(ARGS) == 2 || error(
-    "Usage: julia --project=tools tools/build_metal_reference.jl CHECKPOINT OUTPUT_JSON",
+    "Usage: julia --project=tools tools/build_reference.jl CHECKPOINT OUTPUT_JSON",
 )
 context = pydict(
     "checkpoint" => abspath(ARGS[1]),

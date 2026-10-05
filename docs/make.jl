@@ -15,10 +15,9 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
-        "Models and export" => "models.md",
+        "Models" => "models.md",
         "Inference" => "inference.md",
         "Performance" => "performance.md",
-        "Profiling and measurements" => "profiling.md",
         "API reference" => "api.md",
         "Development" => "development.md",
     ],

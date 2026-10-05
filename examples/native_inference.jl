@@ -1,16 +1,15 @@
 using JeffClient
 import JSON
 
-
-if length(ARGS) == 2 && ARGS[2] == "metal"
-    import Metal
-end
+# GPU packages are optional; load one only when that device is requested.
+length(ARGS) == 2 && ARGS[2] == "metal" && import Metal
+length(ARGS) == 2 && ARGS[2] == "cuda" && import CUDA
 
 function main()
-    length(ARGS) <= 2 || error("Usage: native_inference.jl [CHECKPOINT] [cpu|metal]")
+    length(ARGS) <= 2 || error("Usage: native_inference.jl [CHECKPOINT] [cpu|cuda|metal]")
     sample = JSON.parsefile(joinpath(@__DIR__, "data", "parcel.json"))
     device = length(ARGS) == 2 ? Symbol(ARGS[2]) : :cpu
-    device in (:cpu, :metal) || error("Choose cpu or metal.")
+    device in (:cpu, :cuda, :metal) || error("Choose cpu, cuda or metal.")
     source = isempty(ARGS) ? sample["model"] : ARGS[1]
     checkpoint = resolve_checkpoint(source; revision = sample["revision"])
     backend = NativeBackend(checkpoint; device)

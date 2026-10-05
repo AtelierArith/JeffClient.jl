@@ -1,5 +1,0 @@
-# Use the existing extern/jeff Python environment for torch and transformers.
-# These packages are needed only to export and validate ONNX artifacts.
-onnx==1.23.1
-onnxscript==0.7.2
-onnxruntime==1.30.0
