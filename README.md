@@ -1,13 +1,13 @@
 # JeffClient.jl
 
-Native Julia inference for [Jeff](https://github.com/firelex/jeff), running
-Qwen3.5 on CPU, Apple GPU (Metal.jl) and NVIDIA GPU (CUDA). Inference accepts prepared token
-tensors; text tokenization is not implemented. Python is needed only for export
-and reference tools, through PythonCall.jl.
+Native Julia inference for [Jeff](https://github.com/firelex/jeff) decision
+models, running Qwen3.5 on CPU, NVIDIA GPUs (CUDA.jl) and Apple GPUs
+(Metal.jl). Inference accepts prepared token tensors; text tokenization is not
+implemented. Python is used only by the reference tools, through PythonCall.jl.
 
 ## Minimal example
 
-After the [setup](#setup-guide), run this from the repository root with
+After the [setup](#setup), run this from the repository root with
 `julia --threads=8 --project`. The first run downloads the pinned checkpoint
 (about 1.7 GB). It classifies a bundled, pre-tokenized parcel inquiry on CPU:
 
@@ -43,89 +43,44 @@ For Metal, use `--project=tools`, `import Metal` and
 ## Architecture
 
 The shared infrastructure lives in
-[QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl), a
-separate package: the Qwen3.5 / Qwen3.8 backbone forward pass, the safetensors reader, the Hugging Face checkpoint resolver, the
-automatic CPU policy and the Metal / CUDA / Accelerate / Octavian / SIMD
-extensions. JeffClient is a thin client that adds only what is Jeff-specific:
-the `decision_config.json` / `readout.safetensors` bundle, the linear readout and
-the ONNX export backend. This mirrors
+[QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl): the
+Qwen3.5 / Qwen3.8 backbone forward pass, the safetensors reader, the Hugging
+Face checkpoint resolver, the automatic CPU policy and the CUDA / Metal / CPU
+acceleration extensions. JeffClient is a thin client that adds only what is
+Jeff-specific: the `decision_config.json` / `readout.safetensors` bundle, the
+linear readout and the answer calibration. This mirrors
 [KevClient.jl](https://github.com/AtelierArith/KevClient.jl).
 
-It is not registered on the General registry. `Project.toml` points at
-`https://github.com/AtelierArith/QwenDecisionCore.jl.git` through `[sources]`, so
-`Pkg.instantiate()` clones it automatically and no submodule is involved.
+QwenDecisionCore is not registered; `Project.toml` points at its GitHub
+repository through `[sources]`, so `Pkg.instantiate()` clones it.
 
-## Setup guide
+## Setup
 
-Requirements: Julia 1.13 and Git. The Metal path additionally needs a Mac with
-Apple Silicon (arm64 macOS).
-
-1. Install Julia through [juliaup](https://github.com/JuliaLang/juliaup):
-
-   ```bash
-   curl -fsSL https://install.julialang.org | sh   # then reopen the terminal
-   juliaup add 1.13 && juliaup default 1.13
-   ```
-
-2. Clone the repository. `extern/jeff` is the only submodule; it holds the
-   Python reference used by the tools and is not needed for inference.
-
-   ```bash
-   git clone https://github.com/AtelierArith/JeffClient.jl.git
-   cd JeffClient.jl
-   # optional, for the Python reference tools and reference tests:
-   git submodule update --init extern/jeff
-   ```
-
-3. Install the dependencies. This fetches QwenDecisionCore.jl from GitHub, so
-   internet access is required.
-
-   ```bash
-   julia --project -e 'using Pkg; Pkg.instantiate()'
-   ```
-
-   For Metal, benchmarks and profiling, instantiate the tools workspace instead:
-
-   ```bash
-   julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
-   ```
-
-4. Run the demo. The first run downloads the pinned checkpoint (about 1.7 GB):
-
-   ```bash
-   julia --threads=8 --project examples/native_inference.jl
-   ```
-
-5. Optionally verify the installation with `Pkg.test()` (see [Tests](#tests)).
-
-If instantiation fails with `empty intersection between QwenDecisionCore` or
-cannot find the package, delete the stale `Manifest.toml` files (they are
-git-ignored) and instantiate again.
-
-## Quick start: native Julia on CPU
-
-Run [examples/native_inference.jl](examples/native_inference.jl) with Jeff's
-actual 0.8B weights. First install Julia through
-[juliaup](https://github.com/JuliaLang/juliaup):
+Requirements: Julia 1.13 and Git. CUDA needs an NVIDIA GPU; Metal needs a Mac
+with Apple Silicon.
 
 ```bash
-curl -fsSL https://install.julialang.org | sh   # then reopen the terminal
+curl -fsSL https://install.julialang.org | sh   # juliaup; then reopen the terminal
 juliaup add 1.13 && juliaup default 1.13
+
+git clone https://github.com/AtelierArith/JeffClient.jl.git
+cd JeffClient.jl
+julia --project -e 'using Pkg; Pkg.instantiate()'
+# GPU examples, benchmarks and validation use the tools environment:
+julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
 ```
 
-From the repository root (internet access is needed for dependencies and the
-first model download):
+If instantiation fails with `empty intersection between QwenDecisionCore`,
+delete the stale (git-ignored) `Manifest.toml` files and instantiate again.
+
+## Quick start
 
 ```bash
-julia --project -e 'using Pkg; Pkg.instantiate()'
-julia --project examples/native_inference.jl
+julia --threads=8 --project examples/native_inference.jl
 ```
 
-This downloads the pinned checkpoint if it is not cached (about 1.7 GB) and uses
-a bundled, pre-tokenized parcel inquiry. The native backend loads safetensors
-weights and computes the model in Julia on CPU, using LinearAlgebra/BLAS for
-matrix products. No ONNX model, export, or Python setup is required. Actual CPU
-demo output:
+The first run downloads the pinned Jeff-Qwen3.5-0.8B checkpoint (about 1.7 GB)
+and classifies a bundled, pre-tokenized parcel inquiry on the CPU:
 
 ```text
 Device: cpu
@@ -137,17 +92,32 @@ Choice: delivery
 Confidence: 0.993133
 ```
 
-Pass a local checkpoint directory as the first argument to reuse your weights:
+Pass a checkpoint directory as the first argument to reuse local weights. The
+same demo runs on an NVIDIA GPU with
+`julia --project=tools examples/native_inference.jl CHECKPOINT cuda`, and on a
+Mac's GPU with `julia --project=tools examples/metal_inference.jl`.
 
-```bash
-julia --project examples/native_inference.jl CHECKPOINT_DIRECTORY
+## CUDA
+
+```julia
+using JeffClient, CUDA
+CUDA.allowscalar(false)
+backend = NativeBackend("mstrasser/Jeff-Qwen3.5-0.8B"; device=:cuda)
+scores = logits(backend, inputs)
 ```
 
-The fixed prompt runs entirely in Julia; editing its text requires regenerating
-the tokens. See the [inference page](docs/src/inference.md) for details and
-Metal.
+On an RTX 3060 (Float32, batch 1, 256 tokens of which 101 active, CUDA
+runtime 13.4) a warm forward takes a median **70.6 ms** for the full sequence
+and **34.6 ms** with `QDC_CUDA_TRIM_PADDING=1`, with no GPU allocation per
+forward. Reproduce with:
 
-### Apple GPU (Metal)
+```bash
+julia --threads=8 --project=tools tools/benchmark.jl cuda
+```
+
+See [Performance](docs/src/performance.md) for the conditions.
+
+## Apple GPU (Metal)
 
 On a Mac with an Apple GPU, set up the tools environment, which includes
 Metal.jl, then run [examples/metal_inference.jl](examples/metal_inference.jl):
@@ -160,71 +130,49 @@ julia --project=tools examples/metal_inference.jl CHECKPOINT_DIRECTORY
 ```
 
 This executes the same real-checkpoint demo on an Apple GPU and prints
-`Device: metal`. It shares the CPU demo's model cache; Python and ONNX export are
-not required. The first run compiles GPU kernels, so startup is longer (about
+`Device: metal`. It shares the CPU demo's model cache; ONNX export is not
+required. The first run compiles GPU kernels, so startup is longer (about
 30 s on an Apple M4, Julia 1.13.1, Metal.jl 1.11.1).
 
 To check the Metal numerics against an independent PyTorch reference (this needs
 the `extern/jeff` submodule and the Python tools environment):
 
 ```bash
-julia --project=tools tools/build_metal_reference.jl CHECKPOINT_DIRECTORY reference.json
-julia --project=tools tools/verify_metal.jl CHECKPOINT_DIRECTORY reference.json
+julia --project=tools tools/build_reference.jl CHECKPOINT_DIRECTORY reference.json
+julia --project=tools tools/verify.jl metal CHECKPOINT_DIRECTORY reference.json
 ```
 
 It runs padded and mixed-length cases twice with a GC between cases and fails if
 any logit differs beyond tolerance.
 
-### Optimized CPU execution
+## CPU threads
 
-CPU inference automatically chooses its platform configuration; no tuning
-environment variables are needed. Apple Silicon macOS uses Accelerate; Intel and
-other platforms use portable vector math and Julia-parallel projections. The
-BLAS thread count is set automatically when the core loads (this affects other
-BLAS users in the same process). Start Julia with multiple workers to enable
-parallel kernels:
-
-```bash
-julia --threads=8 --project=tools examples/native_inference.jl
-```
-
-Multiple Julia threads are worth it: they enable the fused task-parallel kernels
-and, when `Threads.nthreads() == 1`, `initialize_cpu!` sets BLAS to the
-physical-core count instead, which is much slower for this hybrid model.
-Measured on an Intel i9-9900K (8 physical cores), a 0.8B forward took about
-128 / 120 / 199 ms at 8 / 16 / 64 tokens with `--threads=8`, versus about
-842 / 893 / 716 ms with the default single-threaded Julia.
-
-This runs on CPU without Metal or MKL. See the performance page for conditions.
+CPU inference chooses its configuration automatically: Accelerate on Apple
+Silicon, portable vector math and Julia-parallel projections elsewhere. Start
+Julia with several threads (`--threads=8`); with a single Julia thread the
+fused task-parallel kernels are disabled and the forward is several times
+slower.
 
 ## Tests
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The offline suite checks the ONNX backend (answers, calibration, export metadata)
-and the native backend against a committed independent PyTorch reference. The
-optional `test/cuda.jl` hardware suite requires a functional NVIDIA GPU.
+The offline suite checks the native backend against a committed independent
+PyTorch reference, plus calibration and configuration errors. The optional
+`test/cuda.jl` hardware suite requires a functional NVIDIA GPU.
 
 ## Documentation
 
-Detailed documentation is maintained with Documenter.jl in [`docs/`](docs):
+Documenter.jl sources live in [`docs/`](docs):
 
 - [Overview](docs/src/index.md)
-- [Model downloads and caching](docs/src/models.md)
-- [Inference, CUDA and Metal](docs/src/inference.md)
-- [Performance comparisons with Python](docs/src/performance.md)
-- [Profiling, allocation findings and Metal tuning](docs/src/profiling.md)
+- [Models](docs/src/models.md)
+- [Inference on CPU, CUDA and Metal](docs/src/inference.md)
+- [Performance](docs/src/performance.md)
 - [API reference](docs/src/api.md)
-- [Development and documentation builds](docs/src/development.md)
+- [Development, tools and documentation builds](docs/src/development.md)
 
-See [measured inference speed](docs/src/profiling.md) for CPU comparisons,
-conditions and reproducible commands. On Apple Silicon macOS, reproduce the
-matched CPU/GPU comparisons with `./tools/mac-M-series.sh` (the one-thread CPU
-comparison and the PyTorch 8 / Julia 8 with automatic Accelerate comparison run
-by default; `--help` lists the options). Joint GPU batching remains experimental.
-
-The [development plan](PLAN.md), [measurement notes](memories/MEMORY.md) and
-[open issues](https://github.com/AtelierArith/JeffClient.jl/issues) track
-remaining work.
+Implementation notes and measurement history are kept in
+[memories/MEMORY.md](memories/MEMORY.md).

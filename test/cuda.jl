@@ -1,6 +1,6 @@
 # Optional hardware suite: run with CUDA and JeffClient in the active environment.
 using Test, CUDA, JeffClient
-using QwenDecisionCore
+import QwenDecisionCore
 const JSON = JeffClient.JSON
 CUDA.functional(true) || error("The CUDA test suite requires a functional GPU.")
 CUDA.allowscalar(false)

@@ -4,6 +4,26 @@
 # Jeff-specific (decision_config.json, readout.safetensors and the answer
 # batching).
 
+# A Jeff checkpoint is a Qwen backbone plus its decision files.
+const CHECKPOINT_REQUIRED =
+    (QwenDecisionCore.DEFAULT_REQUIRED..., "decision_config.json", "readout.safetensors")
+
+"""
+    resolve_checkpoint(model_id_or_path; revision="main", kwargs...)
+
+Return a complete local Jeff checkpoint directory, downloading missing files
+from the Hugging Face Hub when needed. This is
+`QwenDecisionCore.resolve_checkpoint` with Jeff's `decision_config.json` and
+`readout.safetensors` added to the required files; see it for the cache
+locations, offline mode and the other keywords.
+"""
+resolve_checkpoint(model_id_or_path::AbstractString; kwargs...) =
+    QwenDecisionCore.resolve_checkpoint(
+        model_id_or_path;
+        required = CHECKPOINT_REQUIRED,
+        kwargs...,
+    )
+
 """
     NativeBackend(checkpoint; device=:cpu)
 
@@ -30,7 +50,10 @@ function NativeBackend(checkpoint::AbstractString; device::Symbol = :cpu)
     decision["format_version"] == 1 ||
         throw(ArgumentError("Unsupported decision checkpoint format."))
     backbone = QwenBackbone(directory; device)
-    readout = read_native_weights(joinpath(directory, "readout.safetensors"))["weight"]
+    # Materialize once; the reader returns a reinterpreted view of the file.
+    readout = Matrix{Float32}(
+        read_native_weights(joinpath(directory, "readout.safetensors"))["weight"],
+    )
     temperature = Float64(decision["temperature"])
     isfinite(temperature) && temperature > 0 ||
         throw(ArgumentError("Invalid checkpoint temperature."))
@@ -64,22 +87,19 @@ function logits(backend::NativeBackend, inputs::AbstractDict)
         throw(ArgumentError("Mask values must be zero or one."))
     all(mask[:, end] .== 1) ||
         throw(ArgumentError("The final position must be active; use left padding."))
+    readout = backend.readout
     batched = QwenDecisionCore.batch_backbone_hidden(backend.backbone, ids, mask)
-    if batched !== nothing
-        readout = backend.readout isa Array ? backend.readout : Array(backend.readout)
-        return permutedims(transpose(readout) * batched)
-    end
-    readout = backend.readout isa Array ? backend.readout : Array(backend.readout)
+    batched === nothing || return permutedims(transpose(readout) * batched)
     result = Matrix{Float32}(undef, size(ids, 1), size(readout, 2))
     for row in axes(ids, 1)
         first_token =
             QwenDecisionCore.native_sequence_start(backend.backbone.embedding, mask, row)
-        states = backbone_hidden(
+        state = backbone_last_hidden(
             backend.backbone,
             vec(ids[row, first_token:end]),
             vec(mask[row, first_token:end]),
         )
-        result[row, :] .= transpose(readout) * states[:, end]
+        result[row, :] .= transpose(readout) * state
     end
     return result
 end

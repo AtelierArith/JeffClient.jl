@@ -7,7 +7,7 @@ warmups = isempty(warmup_options) ? 2 : parse(Int, split(only(warmup_options), '
 warmups >= 2 || error("Use at least two warmup forwards.")
 benchmark_args = filter(arg -> !startswith(arg, "--warmups="), ARGS)
 length(benchmark_args) in 4:6 || error(
-    "Usage: julia --project=tools tools/benchmark_original.jl CHECKPOINT cpu|mps|mps-f32 REFERENCE_JSON SAMPLES [OUTPUT_JSON] [CASE_INDEX]",
+    "Usage: julia --project=tools tools/benchmark_pytorch.jl CHECKPOINT cpu|mps|mps-f32 REFERENCE_JSON SAMPLES [OUTPUT_JSON] [CASE_INDEX]",
 )
 context = pydict(
     "checkpoint" => abspath(benchmark_args[1]),

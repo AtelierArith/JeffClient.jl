@@ -1,5 +1,14 @@
 # パフォーマンスの知見
 
+## 2026-10-05: CUDA 13 での NativeBackend 再検証と整理
+
+- RTX 3060（Julia1.13.1/CUDA.jl6.4.2/runtime13.4/cuBLAS13.8、F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median70.6ms/p95 71.0ms、`QDC_CUDA_TRIM_PADDING=1` で34.6/36.5ms。warm後GPU割当0、Julia heap約180KB/forward、最大誤差8.6e-6/1.2e-5。10/02旧実装70.43msと同等。runtime12.8固定は不要（ONNX撤去でORTの<13制約が消えた）。
+- QwenDecisionCore切り出し後の退行: `backbone_hidden` が毎回新規の gather 出力を `native_forward_scope` のキーに渡し、CUDA workspace（約0.9GiB）がforwardごとに新設→WeakRef掃除は次の `workspace()` 呼出しまで走らずOOM（12.8でも同じ）。さらにCUDA特化の `native_hidden_forward` に到達していなかった。QDC PR #3（merged）で embedding をキーにし、gather/mask/host転送をscope内へ、`backbone_last_hidden` を追加。JeffClient `logits` はこれを使う。
+- QDC の `resolve_checkpoint` は既定で `config.json` しか必須にしないため、Jeff の `decision_config.json`/`readout.safetensors` が落ちる。JeffClient は `required` を足した自前の `resolve_checkpoint` を持つ。`using JeffClient, QwenDecisionCore` は同名衝突するので、tools/test は `import QwenDecisionCore`。
+- CPU（Xeon E5-2699 v3, 8threads, 既定policy）714ms/p95 1284ms だがホスト負荷 load avg約28 で参考値。
+- ユーザー指示で ONNX 経路（ONNXBackend/load_export/export・fixture）、旧ベンチ群・比較スクリプト・docs の旧ベンチJSON/profiling.md・PLAN.md を削除。tools は benchmark.jl / verify.jl（cpu|cuda|metal）、build_reference.jl、benchmark_pytorch.jl、fixture生成、download のみ。旧CPUチューニング用 `.agents/skills` は削除が権限拒否で残存（内容は削除済みtools前提で陳腐化）。
+- GPU0=計測、GPU1=デバッグ・検証（`CUDA_VISIBLE_DEVICES=1` または verify.jl の GPU 引数）。
+
 ## 2026-10-05: M4 Metal の段階別内訳と trim padding（続き）
 
 - 単発 `Metal.@sync` の段階別測定は、同期1回で約0.5–1ms の遅延を含み過大（6144×256の `x .+ 1` が0.55–1.8ms）。同じ演算を20回流して1回同期し割る方式（amortized）に切り替えた。以前の `tools/benchmark_stages.jl` の表はこの遅延込みで、足し合わせの根拠にしない。
