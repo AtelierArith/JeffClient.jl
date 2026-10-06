@@ -20,17 +20,21 @@ device restoration):
 julia --project=tools test/cuda.jl
 ```
 
-`test/amdgpu.jl` is the corresponding suite for a functional AMD GPU. It needs
-an environment whose QwenDecisionCore checkout provides the AMDGPU extension,
-which is easiest with a local `Pkg.develop` of `extern/QwenDecisionCore.jl`:
+`test/amdgpu.jl` is the corresponding suite for a functional AMD GPU. It runs
+under the standalone `tools/amdgpu` environment (AMDGPU.jl cannot share a
+manifest with the pinned Metal.jl). Until the AMDGPU extension is in the
+QwenDecisionCore revision resolved by `[sources]`, `Pkg.develop` its local
+checkout in that environment first:
 
 ```bash
-julia --project=YOUR_ENV test/amdgpu.jl
+julia --project=tools/amdgpu -e 'using Pkg; Pkg.develop(path="extern/QwenDecisionCore.jl")'
+julia --project=tools/amdgpu test/amdgpu.jl
 ```
 
 ## Tools
 
-The `tools` environment holds CUDA.jl, AMDGPU.jl, Metal.jl and PythonCall:
+The `tools` environment holds CUDA.jl, Metal.jl and PythonCall, and the
+standalone `tools/amdgpu` environment holds AMDGPU.jl for the AMD scripts:
 
 ```bash
 julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'

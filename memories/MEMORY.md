@@ -10,6 +10,8 @@
 - MIOpen 未導入の warning は出るが本推論は MIOpen を使わないので無害。`rocprofv3 --kernel-trace` は Julia プロセスで 31 分 timeout（コンパイル/計測オーバーヘッド大）で使えず、段階計測は `native_forward_scope` 内の同期時間で代用した。
 - 統合: `tools/verify.jl`/`tools/benchmark.jl` が `amdgpu` を受ける、`tools/Project.toml` と `test/Project.toml` に AMDGPU を追加、`test/amdgpu.jl`（182 tests）を追加。QwenDecisionCore のオフライン テストと JeffClient の CPU テストは変更後も全通過。
 - 注意: `test/amdgpu.jl` と `tools` は QwenDecisionCore を GitHub `[sources]` から解決するため、ローカル未 push の extension を使うには `Pkg.develop(path="extern/QwenDecisionCore.jl")` した環境で実行する必要がある。
+- **依存衝突（PR #9 の CI 赤）**: `Metal = "=1.11.1"` は GPUCompiler 2.8.1 → `AMDGPU_LLVM_Backend_jll` 23.1.1 を要求し、AMDGPU 2.8.0 は同 jll 22.x を要求するため 1 つの manifest に共存できない（registry の AMDGPU は 2.8.0 まで、2.8.1+ は未取得）。root `[workspace]` は test/tools/docs をまとめて解決するので、`test/Project.toml`/`tools/Project.toml` に AMDGPU を置くと CI の `Pkg.instantiate(; workspace=true)` が失敗する。対策として AMDGPU は workspace 外の standalone `tools/amdgpu/Project.toml`（JeffClient path、QDC URL、AMDGPU/JSON/Statistics/Test/LinearAlgebra）へ分離。実行は `julia --project=tools/amdgpu …`。`/tools/amdgpu/Manifest.toml` を gitignore に追加。root workspace の再解決と `tools/amdgpu` の解決は実機で確認。
+- **性能の上限調査**: AMDGPU forward は約 85% が GEMM。rocBLAS FP32 は gfx1103 で 8192³ でも ~0.7–0.8 TFLOP/s、同 host の OpenBLAS(16thread) は 4096³ で ~1.0 TFLOP/s と CPU の方が速い。N=101 の形状では ~0.3 TFLOP/s。rocBLAS の FP16 (hgemm) はむしろ遅く（gate_up 形状 4.3ms vs FP32 1.8ms、accumulate FP16 で logit 誤差 ~1e-2）、2e-4 許容では使えない。有効スループット 114 GFLOP/191ms ≈ 0.6 TFLOP/s で rocBLAS の実効上限にほぼ到達。これ以上の短縮には RDNA3 WMMA（FP16 入力・FP32 蓄積・分割精度補償）の自前 GEMM が必要。iGPU の rocBLAS tuning が弱いのが根本原因で、dGPU なら事情が変わる。`rocprofv3` は 31 分 timeout、段階計測は `native_forward_scope` 内の同期で代用。
 
 ## 2026-10-05: CUDA 13 での NativeBackend 再検証と整理
 

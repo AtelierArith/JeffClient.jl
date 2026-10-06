@@ -3,6 +3,7 @@
 # logits return; checkpoint loading, compilation and tokenization are excluded.
 #
 #   julia --threads=8 --project=tools tools/benchmark.jl DEVICE [options]
+#   # DEVICE=amdgpu uses: julia --project=tools/amdgpu tools/benchmark.jl amdgpu
 #
 # DEVICE is cpu, metal, cuda or amdgpu. Options:
 #   --checkpoint DIR   local checkpoint (default: the pinned Hub revision)

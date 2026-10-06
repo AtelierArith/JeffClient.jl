@@ -94,8 +94,9 @@ pinned to the verified Metal.jl 1.11.1.
 
 ## AMD GPUs (AMDGPU)
 
-On Linux with ROCm, add AMDGPU.jl to your environment (the `tools` environment
-already has it), import it and select the device:
+On Linux with ROCm, use the standalone `tools/amdgpu` environment (kept out of
+the main workspace because AMDGPU.jl and the pinned Metal.jl cannot share a
+manifest), import AMDGPU and select the device:
 
 ```julia
 import AMDGPU

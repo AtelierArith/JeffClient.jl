@@ -1,5 +1,4 @@
 [deps]
-AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 JeffClient = "99eee0ee-b0c7-48fb-9455-442e76ba5e88"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 QwenDecisionCore = "fcbe74a4-32ac-465b-ade5-4db25fa89388"
@@ -10,5 +9,4 @@ JeffClient = {path = ".."}
 QwenDecisionCore = {url = "https://github.com/AtelierArith/QwenDecisionCore.jl.git"}
 
 [compat]
-AMDGPU = "2"
 JSON = "1"

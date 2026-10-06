@@ -69,6 +69,8 @@ cd JeffClient.jl
 julia --project -e 'using Pkg; Pkg.instantiate()'
 # GPU examples, benchmarks and validation use the tools environment:
 julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+# AMDGPU has its own standalone environment (not in the workspace):
+julia --project=tools/amdgpu -e 'using Pkg; Pkg.instantiate()'
 ```
 
 If instantiation fails with `empty intersection between QwenDecisionCore`,
@@ -148,8 +150,10 @@ any logit differs beyond tolerance.
 
 ## AMD GPU (AMDGPU)
 
-On a Linux machine with ROCm installed, add AMDGPU.jl (the `tools` environment
-already has it), import it and select the device:
+On a Linux machine with ROCm installed, use the dedicated AMDGPU environment
+(`tools/amdgpu`), which is kept out of the main workspace because AMDGPU.jl and
+the pinned Metal.jl cannot share one manifest. Import AMDGPU and select the
+device:
 
 ```julia
 using JeffClient, AMDGPU
@@ -173,7 +177,8 @@ threads, with about **0.7 MB** of Julia heap per forward instead of 25 MB.
 Reproduce with:
 
 ```bash
-julia --project=tools tools/benchmark.jl amdgpu
+julia --project=tools/amdgpu -e 'using Pkg; Pkg.instantiate()'
+julia --project=tools/amdgpu tools/benchmark.jl amdgpu
 julia --threads=8 --project=tools tools/benchmark.jl cpu
 ```
 
@@ -208,7 +213,7 @@ julia --project -e 'using Pkg; Pkg.test()'
 The offline suite checks the native backend against a committed independent
 PyTorch reference, plus calibration and configuration errors. The optional
 `test/cuda.jl` hardware suite requires a functional NVIDIA GPU and
-`test/amdgpu.jl` requires a functional AMD GPU.
+`test/amdgpu.jl` a functional AMD GPU (run it under `tools/amdgpu`).
 
 ## Documentation
 

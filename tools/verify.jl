@@ -4,6 +4,7 @@
 # results are checked as well as a fresh forward.
 #
 #   julia --threads=8 --project=tools tools/verify.jl DEVICE CHECKPOINT REFERENCE_JSON [GPU]
+#   # DEVICE=amdgpu uses: julia --project=tools/amdgpu tools/verify.jl amdgpu ...
 #
 # GPU selects the CUDA device (default: 1, the debugging GPU when there are two).
 const USAGE = "Usage: verify.jl cpu|metal|cuda|amdgpu CHECKPOINT REFERENCE_JSON [GPU]"
