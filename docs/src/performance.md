@@ -3,7 +3,7 @@
 ## Measuring
 
 ```bash
-julia --threads=8 --project=tools tools/benchmark.jl cuda   # or cpu, metal
+julia --threads=8 --project=tools tools/benchmark.jl cuda   # or cpu, metal, amdgpu
 QDC_CUDA_TRIM_PADDING=1 julia --threads=8 --project=tools tools/benchmark.jl cuda
 julia --threads=8 --project=tools tools/benchmark.jl cpu --output result.json
 ```
@@ -39,3 +39,25 @@ On the same Linux host's CPU (Intel Xeon E5-2699 v3, 8 Julia threads, default
 policy) the median was 714 ms, but the host was shared (load average about 28
 on 36 hardware threads) and p95 reached 1284 ms, so treat it as indicative
 only.
+
+## AMD GPU results (2026-10-06)
+
+AMD Radeon 780M (gfx1103, 12 CUs), Ryzen 9 PRO 8945HS, Ubuntu 24.04, Julia
+1.13.1, AMDGPU.jl 2.8.0, ROCm 7.0, Float32, batch 1, sequence length 256 with
+101 active tokens. Leading padding is trimmed by default for AMDGPU, matching
+the CPU policy, so both columns process 101 tokens.
+
+| Workload | Median | p95 | Julia heap per forward |
+| --- | ---: | ---: | ---: |
+| AMDGPU, padding trimmed (101 tokens) | 191.1 ms | 199.0 ms | 0.7 MB |
+| CPU, 16 Julia threads (101 tokens) | 210.1 ms | 218.6 ms | 25.3 MB |
+| CPU, 8 Julia threads (101 tokens) | 207.7 ms | 229.1 ms | 23.9 MB |
+
+The maximum logit error against the PyTorch reference was `1.2e-5` on AMDGPU
+and `1.0e-5` on CPU. Reproduce with `tools/benchmark.jl amdgpu` and
+`julia --threads=8/16 --project=tools tools/benchmark.jl cpu`; the machine was
+idle. The iGPU shares system memory with the CPU, so the GPU advantage is
+modest: the forward is bound by rocBLAS Float32 throughput (about 0.5 TFLOP/s
+at these sizes), and storing projection weights transposed for contiguous
+`N,N` products is worth roughly 12% over the transposed form. The GPU still
+uses far less Julia heap per forward and no per-forward GPU allocation.

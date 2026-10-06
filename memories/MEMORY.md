@@ -1,5 +1,16 @@
 # パフォーマンスの知見
 
+## 2026-10-06: AMDGPU.jl (gfx1103 Radeon 780M) 拡張の追加
+
+- `extern/QwenDecisionCore.jl` に CUDA 拡張と同型の AMDGPU weak dependency + extension を追加。`AMDGPU = "2"`（実測 2.8.0、ROCm 7.0、Ubuntu 24.04）。weakdep を追加した後は環境で `Pkg.resolve()` しないと extension がロードされない（`Base.get_extension` が `nothing` のまま）。
+- 実装: CUDA 版カーネル（recurrent Gated DeltaNet、causal depthwise、RMS、RoPE/head 整形、softmax、gate merge、MLP）を `AMDGPU.@roc groupsize= gridsize=` へ移植。`threadIdx()/blockIdx()/blockDim()` は AMDGPU に CUDA 互換名があり、`gfx1103` の `wavefrontsize()` は 32。`shfl_xor_sync` の lane offset は `Cint` を渡さないと method error、mask は `UInt64(0xffffffff)` で動作。`native_matmul` は低レベル cublas 呼び出しの代わりに `mul!(scratch, a, b)`（rocBLAS の α/β はホスト定数）。`delta_solve` は `rocBLAS.trsm!('L','L','N','U',…)`。workspace は CUDA 同様 embedding をキーにし stream 完了後に再利用。
+- **rocBLAS は `'N','N'` の連続 GEMM が `'T','N'` より約 12–25% 速い**（gate_up 7168×1024: 3.16→2.89ms、down 1024×3584: 2.02→1.59ms、q 4096×1024: 2.12→1.58ms）。そこでロード時に `native_attention_weights`/`native_mlp_weights` で射影重みを `permutedims` して (out,in) で保持し、`native_linear(weight::ROCMatrix,x)=native_matmul(weight,x)` で転置なしの `N,N` にする。delta の packed projection は `vcat(transpose…)` で行方向に積む。delta_attention の幅参照は `size(…,1)` へ変更。
+- `QDC_AMDGPU_TRIM_PADDING` は既定を 1 にした（CPU policy と同じ左 padding 除去）。tiny fixture の 26 ケース（長さ 1–256、prefix/holes/last-only、trim on/off）すべて最大誤差 6.6e-7 で一致。
+- 計測（Ryzen 9 PRO 8945HS、Radeon 780M 12CU、Julia1.13.1/AMDGPU2.8.0、F32、parcel B1/L256/有効101、trim 有効、30samples、host idle、upload+forward+readout+CPU返却+同期込み）: AMDGPU median **191.1ms**/p95 199.0、Julia heap 0.7MB/forward、GPU 割当は workspace 再利用で warm 後ゼロ。CPU は 16thread 210.1ms/8thread 207.7ms、heap 約24–25MB。max logit error は AMDGPU 1.2e-5、CPU 1.0e-5。M4 Metal (155ms) や RTX3060 (70.6ms) より遅いのは iGPU が system memory 共有で rocBLAS F32 実効 ~0.5TFLOP/s に律速されるため。大幅な短縮には FP16/WMMA（精度懸念）か trim 以外の削減が要る。
+- MIOpen 未導入の warning は出るが本推論は MIOpen を使わないので無害。`rocprofv3 --kernel-trace` は Julia プロセスで 31 分 timeout（コンパイル/計測オーバーヘッド大）で使えず、段階計測は `native_forward_scope` 内の同期時間で代用した。
+- 統合: `tools/verify.jl`/`tools/benchmark.jl` が `amdgpu` を受ける、`tools/Project.toml` と `test/Project.toml` に AMDGPU を追加、`test/amdgpu.jl`（182 tests）を追加。QwenDecisionCore のオフライン テストと JeffClient の CPU テストは変更後も全通過。
+- 注意: `test/amdgpu.jl` と `tools` は QwenDecisionCore を GitHub `[sources]` から解決するため、ローカル未 push の extension を使うには `Pkg.develop(path="extern/QwenDecisionCore.jl")` した環境で実行する必要がある。
+
 ## 2026-10-05: CUDA 13 での NativeBackend 再検証と整理
 
 - RTX 3060（Julia1.13.1/CUDA.jl6.4.2/runtime13.4/cuBLAS13.8、F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median70.6ms/p95 71.0ms、`QDC_CUDA_TRIM_PADDING=1` で34.6/36.5ms。warm後GPU割当0、Julia heap約180KB/forward、最大誤差8.6e-6/1.2e-5。10/02旧実装70.43msと同等。runtime12.8固定は不要（ONNX撤去でORTの<13制約が消えた）。

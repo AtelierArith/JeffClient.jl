@@ -1,9 +1,10 @@
 # JeffClient.jl
 
 Native Julia inference for [Jeff](https://github.com/firelex/jeff) decision
-models, running Qwen3.5 on CPU, NVIDIA GPUs (CUDA.jl) and Apple GPUs
-(Metal.jl). Inference accepts prepared token tensors; text tokenization is not
-implemented. Python is used only by the reference tools, through PythonCall.jl.
+models, running Qwen3.5 on CPU, NVIDIA GPUs (CUDA.jl), Apple GPUs (Metal.jl)
+and AMD GPUs (AMDGPU.jl). Inference accepts prepared token tensors; text
+tokenization is not implemented. Python is used only by the reference tools,
+through PythonCall.jl.
 
 ## Minimal example
 
@@ -45,10 +46,10 @@ For Metal, use `--project=tools`, `import Metal` and
 The shared infrastructure lives in
 [QwenDecisionCore.jl](https://github.com/AtelierArith/QwenDecisionCore.jl): the
 Qwen3.5 / Qwen3.8 backbone forward pass, the safetensors reader, the Hugging
-Face checkpoint resolver, the automatic CPU policy and the CUDA / Metal / CPU
-acceleration extensions. JeffClient is a thin client that adds only what is
-Jeff-specific: the `decision_config.json` / `readout.safetensors` bundle, the
-linear readout and the answer calibration. This mirrors
+Face checkpoint resolver, the automatic CPU policy and the CUDA / Metal /
+AMDGPU / CPU acceleration extensions. JeffClient is a thin client that adds only
+what is Jeff-specific: the `decision_config.json` / `readout.safetensors`
+bundle, the linear readout and the answer calibration. This mirrors
 [KevClient.jl](https://github.com/AtelierArith/KevClient.jl).
 
 QwenDecisionCore is not registered; `Project.toml` points at its GitHub
@@ -57,7 +58,7 @@ repository through `[sources]`, so `Pkg.instantiate()` clones it.
 ## Setup
 
 Requirements: Julia 1.13 and Git. CUDA needs an NVIDIA GPU; Metal needs a Mac
-with Apple Silicon.
+with Apple Silicon; AMDGPU needs an AMD GPU with a working ROCm installation.
 
 ```bash
 curl -fsSL https://install.julialang.org | sh   # juliaup; then reopen the terminal
@@ -145,6 +146,39 @@ julia --project=tools tools/verify.jl metal CHECKPOINT_DIRECTORY reference.json
 It runs padded and mixed-length cases twice with a GC between cases and fails if
 any logit differs beyond tolerance.
 
+## AMD GPU (AMDGPU)
+
+On a Linux machine with ROCm installed, add AMDGPU.jl (the `tools` environment
+already has it), import it and select the device:
+
+```julia
+using JeffClient, AMDGPU
+AMDGPU.allowscalar(false)
+backend = NativeBackend("mstrasser/Jeff-Qwen3.5-0.8B"; device=:amdgpu)
+scores = logits(backend, inputs)
+```
+
+The extension ports the CUDA design to HIP: Float32 Julia `@roc` kernels
+(recurrent Gated DeltaNet, fused convolution and normalization, batched full
+attention), rocBLAS products and a per-model scratch workspace. Projection
+weights are stored transposed at load time so every linear layer is a
+contiguous `N,N` GEMM, which rocBLAS runs faster than the transposed form.
+Leading padding is trimmed by default to match the CPU policy; set
+`QDC_AMDGPU_TRIM_PADDING=0` to keep whole sequences.
+
+On a Radeon 780M iGPU (gfx1103, Float32, batch 1, 256 tokens of which 101
+active, padding trimmed) a warm forward takes a median **191 ms**, versus
+**208–210 ms** for CPU inference on the same Ryzen 9 8945HS at 8–16 Julia
+threads, with about **0.7 MB** of Julia heap per forward instead of 25 MB.
+Reproduce with:
+
+```bash
+julia --project=tools tools/benchmark.jl amdgpu
+julia --threads=8 --project=tools tools/benchmark.jl cpu
+```
+
+See [Performance](docs/src/performance.md) for the conditions.
+
 ## CPU threads
 
 CPU inference selects its platform configuration automatically. On Apple
@@ -173,7 +207,8 @@ julia --project -e 'using Pkg; Pkg.test()'
 
 The offline suite checks the native backend against a committed independent
 PyTorch reference, plus calibration and configuration errors. The optional
-`test/cuda.jl` hardware suite requires a functional NVIDIA GPU.
+`test/cuda.jl` hardware suite requires a functional NVIDIA GPU and
+`test/amdgpu.jl` requires a functional AMD GPU.
 
 ## Documentation
 

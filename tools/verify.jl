@@ -1,18 +1,19 @@
-# Compare NativeBackend logits on CPU, Metal or CUDA with an independent
-# PyTorch reference (tools/build_reference.jl). Every case runs twice with a
-# full GC in between, so reused device buffers and retained results are
-# checked as well as a fresh forward.
+# Compare NativeBackend logits on CPU, Metal, CUDA or AMDGPU with an
+# independent PyTorch reference (tools/build_reference.jl). Every case runs
+# twice with a full GC in between, so reused device buffers and retained
+# results are checked as well as a fresh forward.
 #
 #   julia --threads=8 --project=tools tools/verify.jl DEVICE CHECKPOINT REFERENCE_JSON [GPU]
 #
 # GPU selects the CUDA device (default: 1, the debugging GPU when there are two).
-const USAGE = "Usage: verify.jl cpu|metal|cuda CHECKPOINT REFERENCE_JSON [GPU]"
+const USAGE = "Usage: verify.jl cpu|metal|cuda|amdgpu CHECKPOINT REFERENCE_JSON [GPU]"
 
 length(ARGS) in (3, 4) || error(USAGE)
 const DEVICE = Symbol(ARGS[1])
-DEVICE in (:cpu, :metal, :cuda) || error(USAGE)
+DEVICE in (:cpu, :metal, :cuda, :amdgpu) || error(USAGE)
 DEVICE == :metal && import Metal
 DEVICE == :cuda && import CUDA
+DEVICE == :amdgpu && import AMDGPU
 
 using JeffClient, Test
 import QwenDecisionCore
@@ -27,6 +28,9 @@ function main(checkpoint, reference, gpu)
     elseif DEVICE == :metal
         Metal.functional() || error("A functional Apple GPU is required.")
         Metal.allowscalar(false)
+    elseif DEVICE == :amdgpu
+        AMDGPU.functional() || error("A functional AMD GPU is required.")
+        AMDGPU.allowscalar(false)
     end
     backend = NativeBackend(checkpoint; device = DEVICE)
     source = JSON.parsefile(reference)

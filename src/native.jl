@@ -33,9 +33,9 @@ pass is implemented in Julia through `QwenDecisionCore`. Inputs are prepared
 token IDs and masks; tokenization is not part of this API. Only float32
 inference, default partial RoPE and bias-free projections are supported.
 
-Use `device=:metal` after importing Metal, or `device=:cuda` after importing
-CUDA, for GPU execution. CPU inference automatically selects its platform
-policy through QwenDecisionCore.
+Use `device=:metal` after importing Metal, `device=:cuda` after importing
+CUDA, or `device=:amdgpu` after importing AMDGPU, for GPU execution. CPU
+inference automatically selects its platform policy through QwenDecisionCore.
 """
 struct NativeBackend{B,R} <: AbstractDecisionBackend
     backbone::B

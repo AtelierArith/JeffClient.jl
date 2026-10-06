@@ -1,4 +1,4 @@
-# Inference on CPU, CUDA and Metal
+# Inference on CPU, CUDA, Metal and AMDGPU
 
 ## Demo
 
@@ -92,6 +92,26 @@ result = decide(backend, inputs, question)
 The Metal extension uses Metal internal APIs adapted from Laya.jl, so it is
 pinned to the verified Metal.jl 1.11.1.
 
+## AMD GPUs (AMDGPU)
+
+On Linux with ROCm, add AMDGPU.jl to your environment (the `tools` environment
+already has it), import it and select the device:
+
+```julia
+import AMDGPU
+AMDGPU.allowscalar(false)
+backend = NativeBackend(checkpoint; device=:amdgpu)
+scores = logits(backend, inputs)
+```
+
+The extension mirrors the CUDA kernels with HIP `@roc` launches and uses
+rocBLAS for the projections. Each model owns its scratch buffers, which are
+reused only after its HIP stream completes; forwards sharing a model are
+serialized and returned scores are CPU arrays. Projection weights are stored
+transposed so that linear layers map to contiguous `N,N` GEMMs, and leading
+padding is trimmed by default (`QDC_AMDGPU_TRIM_PADDING=0` keeps full
+sequences). MIOpen is not required.
+
 ## CPU
 
 CPU execution picks its platform configuration automatically. On Apple silicon
@@ -122,4 +142,6 @@ cache and training are not implemented.
 `tools/verify.jl` compares `logits` with an independent PyTorch reference
 (see [Development](development.md)). For the pinned checkpoint, 15 cases
 (lengths 1–512, batches of 2–3, left padding and interior mask holes) agree
-within `1.1e-5` on CUDA, with and without padding trimming.
+within `1.1e-5` on CUDA, with and without padding trimming. On AMDGPU the
+committed tiny fixture covers 26 cases (lengths 1–256, prefix, interior-hole
+and last-token-only masks) within `6.6e-7`, with trimming both on and off.
