@@ -77,3 +77,10 @@ accumulate and split-precision error compensation.
 
 A discrete AMD GPU with dedicated VRAM and stronger rocBLAS tuning is expected
 to show a much larger margin over the CPU.
+
+Improvements for gfx1103 are on hold until AMD ships tuned FP32 Tensile kernels;
+no code change is needed, so updating ROCm is enough to benefit. After
+`sudo apt update && sudo apt full-upgrade`, check whether tuned kernels arrived
+(`strings /opt/rocm/lib/rocblas/library/TensileLibrary_Type_SS_*gfx1103*.dat |
+grep -c 'Cijk_Alik_Bljk_S'` should exceed 1) and re-run
+`julia --project=tools/amdgpu tools/benchmark.jl amdgpu`.
