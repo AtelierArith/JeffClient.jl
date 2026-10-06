@@ -1,10 +1,11 @@
-# Warm, synchronized forward timing of NativeBackend on CPU, Metal or CUDA.
-# Each sample covers input upload, the full forward, readout and the CPU logits
-# return; checkpoint loading, compilation and tokenization are excluded.
+# Warm, synchronized forward timing of NativeBackend on CPU, Metal, CUDA or
+# AMDGPU. Each sample covers input upload, the full forward, readout and the CPU
+# logits return; checkpoint loading, compilation and tokenization are excluded.
 #
 #   julia --threads=8 --project=tools tools/benchmark.jl DEVICE [options]
+#   # DEVICE=amdgpu uses: julia --project=tools/amdgpu tools/benchmark.jl amdgpu
 #
-# DEVICE is cpu, metal or cuda. Options:
+# DEVICE is cpu, metal, cuda or amdgpu. Options:
 #   --checkpoint DIR   local checkpoint (default: the pinned Hub revision)
 #   --reference FILE   prepared inputs and PyTorch logits
 #                      (default: examples/data/parcel_reference.json)
@@ -16,14 +17,15 @@
 #                      BLAS to Accelerate before the model loads (opt-in fast
 #                      path; without it the default BLAS is used)
 #   --output FILE      also write the JSON record to FILE
-const USAGE = "Usage: benchmark.jl cpu|metal|cuda [--checkpoint DIR] [--reference FILE] [--case N] [--samples N] [--warmups N] [--gpu N] [--accelerate] [--output FILE]"
+const USAGE = "Usage: benchmark.jl cpu|metal|cuda|amdgpu [--checkpoint DIR] [--reference FILE] [--case N] [--samples N] [--warmups N] [--gpu N] [--accelerate] [--output FILE]"
 
 const ACCELERATE = "--accelerate" in ARGS
 const CLI = [arg for arg in ARGS if arg != "--accelerate"]
 const DEVICE = isempty(CLI) ? error(USAGE) : Symbol(CLI[1])
-DEVICE in (:cpu, :metal, :cuda) || error(USAGE)
+DEVICE in (:cpu, :metal, :cuda, :amdgpu) || error(USAGE)
 DEVICE == :metal && import Metal
 DEVICE == :cuda && import CUDA
+DEVICE == :amdgpu && import AMDGPU
 if ACCELERATE
     Sys.isapple() || error("--accelerate is only available on macOS")
     import AppleAccelerate
@@ -58,6 +60,7 @@ matrix(rows, T) = reduce(vcat, [permutedims(T.(row)) for row in rows])
 function synchronized_logits(backend, inputs)
     result = logits(backend, inputs)
     DEVICE == :metal && Metal.synchronize()
+    DEVICE == :amdgpu && AMDGPU.synchronize()
     return result
 end
 
@@ -77,6 +80,7 @@ end
 function device_name()
     DEVICE == :cuda && return CUDA.name(CUDA.device())
     DEVICE == :metal && return string(Metal.device().name)
+    DEVICE == :amdgpu && return AMDGPU.HIP.name(AMDGPU.device())
     return Sys.cpu_info()[1].model
 end
 
@@ -90,6 +94,9 @@ function main(args)
     elseif DEVICE == :metal
         Metal.functional() || error("A functional Apple GPU is required.")
         Metal.allowscalar(false)
+    elseif DEVICE == :amdgpu
+        AMDGPU.functional() || error("A functional AMD GPU is required.")
+        AMDGPU.allowscalar(false)
     end
     reference = JSON.parsefile(opts["reference"])
     cases = reference isa AbstractDict ? reference["cases"] : reference
@@ -143,6 +150,10 @@ function main(args)
         record["gpu_allocated_bytes"] = median(t.gpu_bytes for t in trials)
     elseif DEVICE == :metal
         record["metal_jl"] = string(pkgversion(Metal))
+    elseif DEVICE == :amdgpu
+        record["amdgpu_jl"] = string(pkgversion(AMDGPU))
+        record["gcn_arch"] = string(AMDGPU.device().gcn_arch)
+        record["trim_padding"] = get(ENV, "QDC_AMDGPU_TRIM_PADDING", "1") == "1"
     end
     json = JSON.json(record, 2)
     println(json)

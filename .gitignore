@@ -2,6 +2,7 @@
 /Manifest.toml
 /test/Manifest.toml
 /tools/Manifest.toml
+/tools/amdgpu/Manifest.toml
 /docs/Manifest.toml
 /docs/build/
 
