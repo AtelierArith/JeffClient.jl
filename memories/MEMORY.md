@@ -1,5 +1,19 @@
 # パフォーマンスの知見
 
+## 2026-10-10: QwenDecisionCore CUDA 高速化（QDC branch `cuda-speedup`、未コミット）
+
+- 開始時 profile（F32 parcel B1/L256、GPU0）: GPU 71.7ms = projection SGEMM 33.7ms（108回）+ delta recurrent 30.1ms（18層×1.67ms）。SGEMM は大きい形で約7.3TFLOPS（RTX3060 の cuBLAS 上限付近、tn/nn 差なし）。TF32 は consumer Ampere で速くならず精度も崩すため不採用。
+- 採用: (1) delta を64トークンチャンクのWY形式に（`ext/cuda_delta_chunked.jl`: prepare kernel→k'k/k'q batched GEMM→ブロック化 (I+L)^-1 kernel→W'/U' GEMM→チャンク間は heads を strided-batched cuBLAS、`QDC_CUDA_DELTA=recurrent` で旧カーネル）30→約9.5ms、(2) full attention の q/k/v を1本に pack、(3) 最終層は K/V のみ全トークン・Q/out/MLP は最終列のみ、(4) residual+RMS と delta 出力 RMS+silu gate を融合、(5) causal conv を1スレッド8トークンの窓に（75.8→45.9µs）。
+- 結果（tools/benchmark.jl、5warmup/30samples）: 全系列 median 47.45/p95 48.66ms（69.6から−32%）、trim 25.93/26.64ms（34.6から−25%）、GPU割当0、heap 225KB/196KB、最大誤差1.05e-5/1.14e-5。test/cuda.jl は chunked/trim/recurrent いずれも184/184。
+- 不採用: チャンク間を1カーネルに融合（32行×共有メモリ状態）は shared-load 律速で471µs/層と cuBLAS ループ（約250µs）より遅い。勝つにはレジスタタイル GEMM が必要（見込み −3ms）。row view (SubArray) をカーネルに渡すこと自体は遅くなかった。
+- 残り（delta 1層約0.59ms）: chunk loop GEMM 約190µs、prepare 63、k'k/k'q GEMM 57（1.2TFLOPS と低効率）、inverse 51、causal 46、rms_gate 34、qk_norm 32。
+
+## 2026-10-10: CUDA 再確認と PyTorch CUDA 比較
+
+- `test/cuda.jl` を GPU1 で全系列・`QDC_CUDA_TRIM_PADDING=1` とも 184/184 通過（Julia1.13.1/CUDA.jl6.4.1/runtime13.4/cuBLAS13.8）。
+- `tools/benchmark.jl cuda --gpu 0`（F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median69.64/p95 69.93ms、trim 34.56/35.61ms、warm後GPU割当0。
+- `tools/benchmark_pytorch.jl` に `cuda` / `cuda-f32` を追加。PyTorch2.14.0+cu130・オリジナルJeff（FLA Triton）GPU0、入力は事前にGPU上: cuda-f32 median80.43/p95 136.17ms（並行cargoビルドでCPU負荷あり）、最大誤差4.0e-3（FLAのTF32 dot、torch側TF32設定はFalseでも生じる）。bf16 cuda 91.10/92.50ms、誤差2.6e-2。f32 cuda は誤差を報告のみで assert しない。
+
 ## 2026-10-05: CUDA 13 での NativeBackend 再検証と整理
 
 - RTX 3060（Julia1.13.1/CUDA.jl6.4.2/runtime13.4/cuBLAS13.8、F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median70.6ms/p95 71.0ms、`QDC_CUDA_TRIM_PADDING=1` で34.6/36.5ms。warm後GPU割当0、Julia heap約180KB/forward、最大誤差8.6e-6/1.2e-5。10/02旧実装70.43msと同等。runtime12.8固定は不要（ONNX撤去でORTの<13制約が消えた）。
