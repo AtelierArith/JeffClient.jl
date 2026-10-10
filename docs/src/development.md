@@ -20,9 +20,21 @@ device restoration):
 julia --project=tools test/cuda.jl
 ```
 
+`test/amdgpu.jl` is the corresponding suite for a functional AMD GPU. It runs
+under the standalone `tools/amdgpu` environment (AMDGPU.jl cannot share a
+manifest with the pinned Metal.jl). Until the AMDGPU extension is in the
+QwenDecisionCore revision resolved by `[sources]`, `Pkg.develop` its local
+checkout in that environment first:
+
+```bash
+julia --project=tools/amdgpu -e 'using Pkg; Pkg.develop(path="extern/QwenDecisionCore.jl")'
+julia --project=tools/amdgpu test/amdgpu.jl
+```
+
 ## Tools
 
-The `tools` environment holds CUDA.jl, Metal.jl and PythonCall:
+The `tools` environment holds CUDA.jl, Metal.jl and PythonCall, and the
+standalone `tools/amdgpu` environment holds AMDGPU.jl for the AMD scripts:
 
 ```bash
 julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
@@ -30,8 +42,8 @@ julia --project=tools -e 'using Pkg; Pkg.instantiate(; workspace=true)'
 
 | Script | Purpose |
 | --- | --- |
-| `benchmark.jl` | Warm, synchronized timing on CPU, CUDA or Metal ([Performance](performance.md)) |
-| `verify.jl` | Compare logits on CPU, CUDA or Metal with a PyTorch reference, twice per case with GC in between |
+| `benchmark.jl` | Warm, synchronized timing on CPU, CUDA, Metal or AMDGPU ([Performance](performance.md)) |
+| `verify.jl` | Compare logits on CPU, CUDA, Metal or AMDGPU with a PyTorch reference, twice per case with GC in between |
 | `build_reference.jl` | Build that reference for a real checkpoint (PyTorch via PythonCall) |
 | `benchmark_pytorch.jl` | Time the original Python implementation on the same input |
 | `build_native_fixture.jl`, `build_cuda_reference.jl` | Regenerate the test fixture and its CUDA probes |

@@ -1,6 +1,6 @@
 # パフォーマンスの知見
 
-## 2026-10-10: QwenDecisionCore CUDA 高速化（QDC branch `cuda-speedup`、未コミット）
+## 2026-10-10: QwenDecisionCore CUDA 高速化（QwenDecisionCore PR #6、branch `cuda-speedup`）
 
 - 開始時 profile（F32 parcel B1/L256、GPU0）: GPU 71.7ms = projection SGEMM 33.7ms（108回）+ delta recurrent 30.1ms（18層×1.67ms）。SGEMM は大きい形で約7.3TFLOPS（RTX3060 の cuBLAS 上限付近、tn/nn 差なし）。TF32 は consumer Ampere で速くならず精度も崩すため不採用。
 - 採用: (1) delta を64トークンチャンクのWY形式に（`ext/cuda_delta_chunked.jl`: prepare kernel→k'k/k'q batched GEMM→ブロック化 (I+L)^-1 kernel→W'/U' GEMM→チャンク間は heads を strided-batched cuBLAS、`QDC_CUDA_DELTA=recurrent` で旧カーネル）30→約9.5ms、(2) full attention の q/k/v を1本に pack、(3) 最終層は K/V のみ全トークン・Q/out/MLP は最終列のみ、(4) residual+RMS と delta 出力 RMS+silu gate を融合、(5) causal conv を1スレッド8トークンの窓に（75.8→45.9µs）。
@@ -14,6 +14,20 @@
 - `tools/benchmark.jl cuda --gpu 0`（F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median69.64/p95 69.93ms、trim 34.56/35.61ms、warm後GPU割当0。
 - `tools/benchmark_pytorch.jl` に `cuda` / `cuda-f32` を追加。PyTorch2.14.0+cu130・オリジナルJeff（FLA Triton）GPU0、入力は事前にGPU上: cuda-f32 median80.43/p95 136.17ms（並行cargoビルドでCPU負荷あり）、最大誤差4.0e-3（FLAのTF32 dot、torch側TF32設定はFalseでも生じる）。bf16 cuda 91.10/92.50ms、誤差2.6e-2。f32 cuda は誤差を報告のみで assert しない。
 
+## 2026-10-06: AMDGPU.jl (gfx1103 Radeon 780M) 拡張の追加
+
+- `extern/QwenDecisionCore.jl` に CUDA 拡張と同型の AMDGPU weak dependency + extension を追加。`AMDGPU = "2"`（実測 2.8.0、ROCm 7.0、Ubuntu 24.04）。weakdep を追加した後は環境で `Pkg.resolve()` しないと extension がロードされない（`Base.get_extension` が `nothing` のまま）。
+- 実装: CUDA 版カーネル（recurrent Gated DeltaNet、causal depthwise、RMS、RoPE/head 整形、softmax、gate merge、MLP）を `AMDGPU.@roc groupsize= gridsize=` へ移植。`threadIdx()/blockIdx()/blockDim()` は AMDGPU に CUDA 互換名があり、`gfx1103` の `wavefrontsize()` は 32。`shfl_xor_sync` の lane offset は `Cint` を渡さないと method error、mask は `UInt64(0xffffffff)` で動作。`native_matmul` は低レベル cublas 呼び出しの代わりに `mul!(scratch, a, b)`（rocBLAS の α/β はホスト定数）。`delta_solve` は `rocBLAS.trsm!('L','L','N','U',…)`。workspace は CUDA 同様 embedding をキーにし stream 完了後に再利用。
+- **rocBLAS は `'N','N'` の連続 GEMM が `'T','N'` より約 12–25% 速い**（gate_up 7168×1024: 3.16→2.89ms、down 1024×3584: 2.02→1.59ms、q 4096×1024: 2.12→1.58ms）。そこでロード時に `native_attention_weights`/`native_mlp_weights` で射影重みを `permutedims` して (out,in) で保持し、`native_linear(weight::ROCMatrix,x)=native_matmul(weight,x)` で転置なしの `N,N` にする。delta の packed projection は `vcat(transpose…)` で行方向に積む。delta_attention の幅参照は `size(…,1)` へ変更。
+- `QDC_AMDGPU_TRIM_PADDING` は既定を 1 にした（CPU policy と同じ左 padding 除去）。tiny fixture の 26 ケース（長さ 1–256、prefix/holes/last-only、trim on/off）すべて最大誤差 6.6e-7 で一致。
+- 計測（Ryzen 9 PRO 8945HS、Radeon 780M 12CU、Julia1.13.1/AMDGPU2.8.0、F32、parcel B1/L256/有効101、trim 有効、30samples、host idle、upload+forward+readout+CPU返却+同期込み）: AMDGPU median **191.1ms**/p95 199.0、Julia heap 0.7MB/forward、GPU 割当は workspace 再利用で warm 後ゼロ。CPU は 16thread 210.1ms/8thread 207.7ms、heap 約24–25MB。max logit error は AMDGPU 1.2e-5、CPU 1.0e-5。M4 Metal (155ms) や RTX3060 (70.6ms) より遅いのは iGPU が system memory 共有で rocBLAS F32 実効 ~0.5TFLOP/s に律速されるため。大幅な短縮には FP16/WMMA（精度懸念）か trim 以外の削減が要る。
+- MIOpen 未導入の warning は出るが本推論は MIOpen を使わないので無害。`rocprofv3 --kernel-trace` は Julia プロセスで 31 分 timeout（コンパイル/計測オーバーヘッド大）で使えず、段階計測は `native_forward_scope` 内の同期時間で代用した。
+- 統合: `tools/verify.jl`/`tools/benchmark.jl` が `amdgpu` を受ける、`tools/Project.toml` と `test/Project.toml` に AMDGPU を追加、`test/amdgpu.jl`（182 tests）を追加。QwenDecisionCore のオフライン テストと JeffClient の CPU テストは変更後も全通過。
+- 注意: `test/amdgpu.jl` と `tools` は QwenDecisionCore を GitHub `[sources]` から解決するため、ローカル未 push の extension を使うには `Pkg.develop(path="extern/QwenDecisionCore.jl")` した環境で実行する必要がある。
+- **依存衝突（PR #9 の CI 赤）**: `Metal = "=1.11.1"` は GPUCompiler 2.8.1 → `AMDGPU_LLVM_Backend_jll` 23.1.1 を要求し、AMDGPU 2.8.0 は同 jll 22.x を要求するため 1 つの manifest に共存できない（registry の AMDGPU は 2.8.0 まで、2.8.1+ は未取得）。root `[workspace]` は test/tools/docs をまとめて解決するので、`test/Project.toml`/`tools/Project.toml` に AMDGPU を置くと CI の `Pkg.instantiate(; workspace=true)` が失敗する。対策として AMDGPU は workspace 外の standalone `tools/amdgpu/Project.toml`（JeffClient path、QDC URL、AMDGPU/JSON/Statistics/Test/LinearAlgebra）へ分離。実行は `julia --project=tools/amdgpu …`。`/tools/amdgpu/Manifest.toml` を gitignore に追加。root workspace の再解決と `tools/amdgpu` の解決は実機で確認。
+- **性能の上限調査**: AMDGPU forward は約 85% が GEMM。rocBLAS FP32 は gfx1103 で 8192³ でも ~0.7–0.8 TFLOP/s、同 host の OpenBLAS(16thread) は 4096³ で ~1.0 TFLOP/s と CPU の方が速い。N=101 の形状では ~0.3 TFLOP/s。rocBLAS の FP16 (hgemm) はむしろ遅く（gate_up 形状 4.3ms vs FP32 1.8ms、accumulate FP16 で logit 誤差 ~1e-2）、2e-4 許容では使えない。有効スループット 114 GFLOP/191ms ≈ 0.6 TFLOP/s で rocBLAS の実効上限にほぼ到達。これ以上の短縮には RDNA3 WMMA（FP16 入力・FP32 蓄積・分割精度補償）の自前 GEMM が必要。iGPU の rocBLAS tuning が弱いのが根本原因で、dGPU なら事情が変わる。`rocprofv3` は 31 分 timeout、段階計測は `native_forward_scope` 内の同期で代用。
+- **原因の特定と環境依存**: この ROCm 7.14.1（`apt` の `amdrocm-blas7.14-gfx1103`）は gfx1103 向け FP32 (SS) Tensile を 1 解（32×32×8）しか持たない（`TensileLibrary_Type_SS_*gfx1103.dat` が 1941 bytes、FP16 の HH は ~380KB）。hipBLASLt の gfx1103 FP32 も `.co` 16KB/`.dat.zlib` 3.4KB と最小限。`amdrocm-blas7.14-gfx1103` の再インストールは同一バージョンで無効、`amdrocm-blas7.14-gfx1102` + `HSA_OVERRIDE_GFX_VERSION=11.0.2` も 7.14 では gfx1102 側も同じ 1 解で効果なし（AMD 既知 issue rocm-libraries#6320 / legacy-rocm-build#6049）。独自 tiled SGEMM の初版（64×64×16、TM=TN=4）は正しいが 140–240 GFLOPS で rocBLAS（290–770）に 1/3 以下、本格 tuning でも forward 100–130ms 程度が現実的。ユーザー判断で **AMD が gfx1103 FP32 Tensile を出荷するまで速度改善は保留**。コード変更は不要で、ROCm 更新後は `sudo apt update && sudo apt full-upgrade` だけで rocBLAS が速くなる。再確認は `strings /opt/rocm/lib/rocblas/library/TensileLibrary_Type_SS_*gfx1103*.dat | grep -c 'Cijk_Alik_Bljk_S'` が 1 より大きいか、`julia --project=tools/amdgpu tools/benchmark.jl amdgpu` の median が 190ms より短いか。
+
 ## 2026-10-05: CUDA 13 での NativeBackend 再検証と整理
 
 - RTX 3060（Julia1.13.1/CUDA.jl6.4.2/runtime13.4/cuBLAS13.8、F32、parcel B1/L256/有効101、5warmup/30samples、upload・readout・CPU返却・同期込み）: 全系列 median70.6ms/p95 71.0ms、`QDC_CUDA_TRIM_PADDING=1` で34.6/36.5ms。warm後GPU割当0、Julia heap約180KB/forward、最大誤差8.6e-6/1.2e-5。10/02旧実装70.43msと同等。runtime12.8固定は不要（ONNX撤去でORTの<13制約が消えた）。
@@ -22,6 +36,16 @@
 - CPU（Xeon E5-2699 v3, 8threads, 既定policy）714ms/p95 1284ms だがホスト負荷 load avg約28 で参考値。
 - ユーザー指示で ONNX 経路（ONNXBackend/load_export/export・fixture）、旧ベンチ群・比較スクリプト・docs の旧ベンチJSON/profiling.md・PLAN.md を削除。tools は benchmark.jl / verify.jl（cpu|cuda|metal）、build_reference.jl、benchmark_pytorch.jl、fixture生成、download のみ。旧CPUチューニング用 `.agents/skills` は削除が権限拒否で残存（内容は削除済みtools前提で陳腐化）。
 - GPU0=計測、GPU1=デバッグ・検証（`CUDA_VISIBLE_DEVICES=1` または verify.jl の GPU 引数）。
+
+## 2026-10-05: M4 Metal の段階別内訳と trim padding（続き）
+
+- 単発 `Metal.@sync` の段階別測定は、同期1回で約0.5–1ms の遅延を含み過大（6144×256の `x .+ 1` が0.55–1.8ms）。同じ演算を20回流して1回同期し割る方式（amortized）に切り替えた。以前の `tools/benchmark_stages.jl` の表はこの遅延込みで、足し合わせの根拠にしない。
+- amortized内訳（全256token、1層）: DeltaNet attention 4.72ms（matmul 2.28、recurrent 1.94、causal conv 0.44、Q/K整形0.14、他0.08）、MLP 2.31ms、full attention 2.03ms。18/24/6層で約85/55/12ms、合計約152msは実測155msと一致。
+- matmulはqkv/z/out/MLPとも約2.4–2.5TFLOPSで、MPS直呼びの大行列（4096³、2.7TFLOPS）の実効上限にほぼ届く。MLPのスラックは1層約0.24ms（24層で約6ms）のため、gate/up/downのMPSGraph融合は効果が小さいと判断し未実施。F16は数値を崩すので使わない。
+- `QDC_METAL_TRIM_PADDING=1`（有効101token）で median155.1→73.4ms（他の任意フラグ全ONで70.4ms）、最大logit誤差7.63e-6（base6.68e-6）。CPU8thread 191.8msの約2.6倍。既定はまだ0（opt-in）。既定化には padding・系列長・同長で異なるmask・GC後再利用の検証が必要で、未判断。
+- recurrentの追加試行は効果なし: `air.simd_sum.f32`（llvmcall、動作確認済）への置換は1.94→1.89msのみ（約3%）、次トークンのprefetchはレジスタ増で1.89→2.24msに悪化。どちらも未採用。GPUプロファイラ（Xcode）がないため律速要因は未特定。
+- recurrent の部品除去（amortized、M4、L256）: 全部入り2.27ms、出力store無し1.49ms、reduction無し2.13ms、query load無し1.82ms。出力storeが支配的で、lane1だけが4行を単発4Bで書いていた。4行結果を lane1–4 が1 storeで書く版で1.94→1.71ms（出力は完全一致）、end-to-endは全256token 157.7/156.6→155.4/152.0ms、trim 71.9/73.1→71.5/69.6ms。threadgroup内SIMD group数は4が最良（2/4/8/16/32=1.73/1.71/1.84/2.08/2.27ms）。QwenDecisionCore PR #4。単体では closure/入れ子tupleを使うと LLVM inliner が bus error になるため、行処理は `@inline` 関数に分けて書く。
+- causal depthwise をレジスタ上で4tapスライドさせる版は出力一致、end-to-end約1–3%（全256token 159.5/157.2→153.9/155.4ms、trim 73.4/72.9→71.9/71.7ms、交互A/B）。QwenDecisionCore PR #2。host非隔離で変動大（p95最大221ms）。
 
 ## 2026-10-05: Apple M4 の Metal 経路（DeltaNet recurrence の load 律速）
 
